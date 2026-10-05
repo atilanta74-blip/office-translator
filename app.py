@@ -1,9 +1,10 @@
 import io
 import os
 import streamlit as st
-import google.generativeai as genai
 from deep_translator import GoogleTranslator
 import openpyxl
+from openpyxl.cell.text import InlineFont
+from openpyxl.cell.rich_text import CellRichText, TextBlock
 from docx import Document
 from pptx import Presentation
 
@@ -31,88 +32,112 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Támogatott nyelvek és kódjaik
-LANG_MAP = {
-    "Magyar (Hungarian)": {"name": "Hungarian", "code": "hu"},
-    "Angol (English)": {"name": "English", "code": "en"},
-    "Német (German)": {"name": "German", "code": "de"},
-    "Olasz (Italian)": {"name": "Italian", "code": "it"},
-    "Francia (French)": {"name": "French", "code": "fr"},
-    "Spanyol (Spanish)": {"name": "Spanish", "code": "es"},
-    "Lengyel (Polish)": {"name": "Polish", "code": "pl"},
-    "Cseh (Czech)": {"name": "Czech", "code": "cs"},
-    "Szlovák (Slovak)": {"name": "Slovak", "code": "sk"},
-    "Román (Romanian)": {"name": "Romanian", "code": "ro"},
-    "Japán (Japanese)": {"name": "Japanese", "code": "ja"},
-    "Török (Turkish)": {"name": "Turkish", "code": "tr"},
-    "Vietnámi (Vietnamese)": {"name": "Vietnamese", "code": "vi"}
+# Nyelvek kódjai
+LANGUAGES = {
+    "Magyar (Hungarian)": "hu",
+    "Angol (English)": "en",
+    "Német (German)": "de",
+    "Olasz (Italian)": "it",
+    "Francia (French)": "fr",
+    "Spanyol (Spanish)": "es",
+    "Lengyel (Polish)": "pl",
+    "Cseh (Czech)": "cs",
+    "Szlovák (Slovak)": "sk",
+    "Román (Romanian)": "ro",
+    "Japán (Japanese)": "ja",
+    "Török (Turkish)": "tr",
+    "Vietnámi (Vietnamese)": "vi"
 }
 
-# Gemini API beállítása
-gemini_key = st.secrets.get("GEMINI_API_KEY")
-gemini_model = None
+# Tisztító és fordító függvény
+def translate_clean_text(raw_val, target_lang_code, translator, cache):
+    if raw_val is None:
+        return raw_val
 
-if gemini_key:
+    # Ha RichText típus
+    if isinstance(raw_val, CellRichText):
+        new_rich = CellRichText()
+        for block in raw_val:
+            if isinstance(block, str):
+                new_rich.append(translate_clean_text(block, target_lang_code, translator, cache))
+            elif isinstance(block, TextBlock):
+                trans_t = translate_clean_text(block.text, target_lang_code, translator, cache)
+                new_rich.append(TextBlock(font=block.font, text=trans_t))
+            else:
+                new_rich.append(block)
+        return new_rich
+
+    # Sima szöveges feldolgozás
+    text_str = str(raw_val).strip()
+
+    # Szűrők: ne fordítson képletet, tisztán számot, vagy dátumformátumot
+    if not text_str or text_str.startswith("=") or len(text_str) <= 1:
+        return raw_val
+    if text_str.replace(".", "").replace(",", "").replace("-", "").replace("%", "").replace("/", "").isdigit():
+        return raw_val
+
+    # Vezető aposztróf levágása ha van
+    has_leading_apostrophe = text_str.startswith("'")
+    if has_leading_apostrophe:
+        text_str = text_str[1:].strip()
+
+    # Kérdő gyorsítótárból
+    if text_str in cache:
+        res = cache[text_str]
+        return f"'{res}" if has_leading_apostrophe else res
+
     try:
-        genai.configure(api_key=gemini_key)
-        # Megkeressük a fiókhoz elérhető működő Gemini modellt
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                if 'gemini' in m.name:
-                    gemini_model = genai.GenerativeModel(model_name=m.name)
-                    break
+        translated = translator.translate(text_str)
+        if not translated:
+            translated = text_str
+        cache[text_str] = translated
+        return f"'{translated}" if has_leading_apostrophe else translated
     except Exception:
-        gemini_model = None
+        return raw_val
 
-# Megbízható fordító függvény kettős védelemmel
-def translate_single_text(text, target_lang_name, target_lang_code, cache):
-    text_clean = str(text).strip()
-    if not text_clean or text_clean.isdigit() or len(text_clean) <= 1:
-        return text
-    
-    # Ha az Excel elejére aposztrófot tett
-    if text_clean.startswith("'"):
-        text_clean = text_clean[1:].strip()
+# Excel (.xlsx) feldolgozás - minden cellát, munkalapot és összevont cellát bejárva
+def process_xlsx(file_bytes, target_lang_code, progress_bar, status_box):
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
+    translator = GoogleTranslator(source='auto', target=target_lang_code)
+    cache = {}
 
-    if text_clean in cache:
-        return cache[text_clean]
+    total_translated = 0
+    total_sheets = len(wb.worksheets)
 
-    # 1. Próbálkozás: Gemini AI
-    if gemini_model:
-        try:
-            prompt = (
-                f"Translate this industrial/business text accurately into {target_lang_name}. "
-                f"Keep acronyms (OEE, KPI, TIR, IPS, UPS, PDCA, BS, TBR, PSR, FI) intact. "
-                f"Return ONLY the translated text:\n{text_clean}"
-            )
-            res = gemini_model.generate_content(prompt)
-            if res.text and len(res.text.strip()) > 0:
-                translated = res.text.strip()
-                cache[text_clean] = translated
-                return translated
-        except Exception:
-            pass
+    for s_idx, ws in enumerate(wb.worksheets):
+        status_box.info(f"Munkalap fordítása: {ws.title} ({s_idx + 1}/{total_sheets})...")
 
-    # 2. Garantált tartalék: Deep Translator (Google Translate)
-    try:
-        fallback_trans = GoogleTranslator(source='auto', target=target_lang_code).translate(text_clean)
-        cache[text_clean] = fallback_trans
-        return fallback_trans
-    except Exception:
-        return text
+        # Végigmegyünk minden soron és oszlopon
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value is not None:
+                    orig_val = cell.value
+                    new_val = translate_clean_text(orig_val, target_lang_code, translator, cache)
+                    if new_val != orig_val:
+                        cell.value = new_val
+                        total_translated += 1
+
+        progress_bar.progress(int(10 + ((s_idx + 1) / total_sheets) * 85))
+
+    out_stream = io.BytesIO()
+    wb.save(out_stream)
+    progress_bar.progress(100)
+    return out_stream.getvalue(), total_translated
 
 # Word (.docx) feldolgozás
-def process_docx(file_bytes, target_lang_name, target_lang_code, progress_bar):
+def process_docx(file_bytes, target_lang_code, progress_bar, status_box):
     doc = Document(io.BytesIO(file_bytes))
+    translator = GoogleTranslator(source='auto', target=target_lang_code)
     cache = {}
-    
-    total = len(doc.paragraphs)
-    for idx, p in enumerate(doc.paragraphs):
+    total_translated = 0
+
+    for p in doc.paragraphs:
         for run in p.runs:
             if run.text.strip():
-                run.text = translate_single_text(run.text, target_lang_name, target_lang_code, cache)
-        if total > 0 and idx % 5 == 0:
-            progress_bar.progress(int(10 + (idx / total) * 40))
+                new_t = translate_clean_text(run.text, target_lang_code, translator, cache)
+                if new_t != run.text:
+                    run.text = new_t
+                    total_translated += 1
 
     for table in doc.tables:
         for row in table.rows:
@@ -120,72 +145,50 @@ def process_docx(file_bytes, target_lang_name, target_lang_code, progress_bar):
                 for p in cell.paragraphs:
                     for run in p.runs:
                         if run.text.strip():
-                            run.text = translate_single_text(run.text, target_lang_name, target_lang_code, cache)
+                            new_t = translate_clean_text(run.text, target_lang_code, translator, cache)
+                            if new_t != run.text:
+                                run.text = new_t
+                                total_translated += 1
 
-    progress_bar.progress(95)
     out_stream = io.BytesIO()
     doc.save(out_stream)
     progress_bar.progress(100)
-    return out_stream.getvalue()
-
-# Excel (.xlsx) feldolgozás (összevont cellák, stringek, számok kezelése)
-def process_xlsx(file_bytes, target_lang_name, target_lang_code, progress_bar):
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
-    cache = {}
-    sheets = wb.worksheets
-    total_s = len(sheets)
-
-    for s_idx, ws in enumerate(sheets):
-        for row in ws.iter_rows():
-            for cell in row:
-                if cell.value is not None:
-                    val_str = str(cell.value).strip()
-                    # Képletek kihagyása
-                    if val_str.startswith("="):
-                        continue
-                    # Számok kihagyása
-                    if val_str.replace(".", "").replace(",", "").replace("-", "").isdigit():
-                        continue
-                    
-                    if len(val_str) > 1:
-                        cell.value = translate_single_text(val_str, target_lang_name, target_lang_code, cache)
-
-        progress_bar.progress(int(10 + ((s_idx + 1) / total_s) * 85))
-
-    out_stream = io.BytesIO()
-    wb.save(out_stream)
-    progress_bar.progress(100)
-    return out_stream.getvalue()
+    return out_stream.getvalue(), total_translated
 
 # PowerPoint (.pptx) feldolgozás
-def process_pptx(file_bytes, target_lang_name, target_lang_code, progress_bar):
+def process_pptx(file_bytes, target_lang_code, progress_bar, status_box):
     prs = Presentation(io.BytesIO(file_bytes))
+    translator = GoogleTranslator(source='auto', target=target_lang_code)
     cache = {}
-    total_slides = len(prs.slides)
+    total_translated = 0
 
-    for idx, slide in enumerate(prs.slides):
+    for slide in prs.slides:
         for shape in slide.shapes:
             if shape.has_text_frame:
                 for p in shape.text_frame.paragraphs:
                     for run in p.runs:
                         if run.text.strip():
-                            run.text = translate_single_text(run.text, target_lang_name, target_lang_code, cache)
+                            new_t = translate_clean_text(run.text, target_lang_code, translator, cache)
+                            if new_t != run.text:
+                                run.text = new_t
+                                total_translated += 1
             if shape.has_table:
                 for row in shape.table.rows:
                     for cell in row.cells:
                         for p in cell.text_frame.paragraphs:
                             for run in p.runs:
                                 if run.text.strip():
-                                    run.text = translate_single_text(run.text, target_lang_name, target_lang_code, cache)
-        if total_slides > 0:
-            progress_bar.progress(int(10 + ((idx + 1) / total_slides) * 85))
+                                    new_t = translate_clean_text(run.text, target_lang_code, translator, cache)
+                                    if new_t != run.text:
+                                        run.text = new_t
+                                        total_translated += 1
 
     out_stream = io.BytesIO()
     prs.save(out_stream)
     progress_bar.progress(100)
-    return out_stream.getvalue()
+    return out_stream.getvalue(), total_translated
 
-# --- Felület (UI) ---
+# --- Felhasználói felület ---
 st.markdown('<div class="main-title">🌐 Office Document Translator Pro</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
@@ -197,7 +200,7 @@ uploaded_file = st.file_uploader(
 
 col1, col2 = st.columns([2, 1])
 with col1:
-    target_lang_name = st.selectbox("2. Válassz célnyelvet:", list(LANG_MAP.keys()), index=0)
+    target_lang_name = st.selectbox("2. Válassz célnyelvet:", list(LANGUAGES.keys()), index=0)
 with col2:
     st.write("")
     st.write("")
@@ -207,29 +210,30 @@ if translate_button:
     if uploaded_file is None:
         st.warning("Kérlek, válassz ki egy fájlt a fordítás megkezdéséhez!")
     else:
-        lang_info = LANG_MAP[target_lang_name]
+        lang_code = LANGUAGES[target_lang_name]
         ext = os.path.splitext(uploaded_file.name)[1].lower()
         file_bytes = uploaded_file.read()
 
-        status_text = st.empty()
+        status_box = st.empty()
         progress_bar = st.progress(5)
-        status_text.info(f"Fordítás folyamatban ({target_lang_name})...")
+        status_box.info(f"Feldolgozás és fordítás folyamatban ({target_lang_name})...")
 
         try:
             translated_bytes = None
+            count = 0
             if ext == ".docx":
-                translated_bytes = process_docx(file_bytes, lang_info["name"], lang_info["code"], progress_bar)
+                translated_bytes, count = process_docx(file_bytes, lang_code, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             elif ext == ".xlsx":
-                translated_bytes = process_xlsx(file_bytes, lang_info["name"], lang_info["code"], progress_bar)
+                translated_bytes, count = process_xlsx(file_bytes, lang_code, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             elif ext == ".pptx":
-                translated_bytes = process_pptx(file_bytes, lang_info["name"], lang_info["code"], progress_bar)
+                translated_bytes, count = process_pptx(file_bytes, lang_code, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
-            status_text.success("✅ A dokumentum sikeresen lefordítva!")
+            status_box.success(f"✅ Kész! Összesen {count} db szöveges elem sikeresen lefordítva.")
             base_name, _ = os.path.splitext(uploaded_file.name)
-            output_filename = f"{base_name}_forditott_{lang_info['code']}{ext}"
+            output_filename = f"{base_name}_forditott_{lang_code}{ext}"
 
             st.download_button(
                 label=f"📥 Lefordított fájl letöltése ({output_filename})",
@@ -242,7 +246,7 @@ if translate_button:
 
         except Exception as e:
             progress_bar.empty()
-            status_text.error(f"Hiba történt a feldolgozás során: {e}")
+            status_box.error(f"Hiba történt a feldolgozás során: {e}")
 
 st.markdown("""
     <div class="footer-bar">
