@@ -31,7 +31,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v4.0 Gemini-Core</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v4.5 Flash</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -50,7 +50,7 @@ LANGUAGES = {
     "Vietnámi (Vietnamese)": "Vietnamese"
 }
 
-# API kulcs és modell inicializálása
+# API kulcs ellenőrzése
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 if not gemini_key:
     st.error("⚠️ Hiányzik a GEMINI_API_KEY a Secrets beállításokból!")
@@ -58,23 +58,43 @@ if not gemini_key:
 
 genai.configure(api_key=gemini_key)
 
-# Működő Gemini modell automatikus lekérdezése
+# A Google API által kért pontos modellek listája sorrendben
+CANDIDATE_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-1.5-pro",
+    "gemini-pro"
+]
+
 active_model = None
-try:
-    for m in genai.list_models():
-        if "generateContent" in m.supported_generation_methods:
-            active_model = genai.GenerativeModel(model_name=m.name)
-            break
-except Exception as e:
-    st.error(f"Hiba a Gemini modellek listázásakor: {e}")
+for m_name in CANDIDATE_MODELS:
+    try:
+        test_m = genai.GenerativeModel(model_name=m_name)
+        test_m.generate_content("test")
+        active_model = test_m
+        break
+    except Exception:
+        continue
 
 if not active_model:
-    active_model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+    # Ha a fenti lista valamiért nem indulna el, a dinamikus lista első aktív generáló modellje:
+    try:
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                active_model = genai.GenerativeModel(model_name=m.name)
+                break
+    except Exception:
+        pass
+
+if not active_model:
+    st.error("⚠️ Nem sikerült elérhető Gemini modellt inicializálni az API kulccsal.")
+    st.stop()
 
 SEP = " ###|||### "
 
 def translate_batch(texts, target_lang):
-    """Kötegelt szakfordítás közvetlenül a Geminivel."""
+    """Kötegelt szakfordítás közvetlenül a Gemini modellel."""
     if not texts:
         return {}
     
@@ -107,20 +127,18 @@ def translate_batch(texts, target_lang):
                     r = active_model.generate_content(f"Translate accurately to {target_lang}. Return ONLY translated text:\n{o}")
                     results[o] = r.text.strip()
         except Exception as e:
-            st.warning(f"Gemini API hiba: {e}")
+            st.warning(f"API hiba: {e}")
             for o in chunk:
                 results[o] = o
 
     return results
 
 def is_translatable(txt):
-    """Eldönti egy szövegről, hogy valóban lefordítandó szöveg-e."""
     if not txt:
         return False
     t = txt.strip()
     if len(t) <= 1 or t.startswith("="):
         return False
-    # Tisztán számok és dátumkarakterek kizárása
     num_test = t.replace(".", "").replace(",", "").replace("-", "").replace("%", "").replace("/", "").replace(" ", "")
     if num_test.isdigit():
         return False
@@ -135,10 +153,9 @@ def process_xlsx_gemini(file_bytes, target_lang, progress_bar, status_box):
     out_zip_buffer = io.BytesIO()
     out_zip = zipfile.ZipFile(out_zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED)
 
-    all_elements = []  # (xml_filename, elem_reference, original_text)
-
-    # 1. Lépés: Összegyűjtjük az összes szöveget
+    all_elements = []
     parsed_files = {}
+
     for item in in_zip.infolist():
         content = in_zip.read(item.filename)
         if item.filename.endswith(".xml") and not item.filename.endswith("styles.xml"):
@@ -153,22 +170,19 @@ def process_xlsx_gemini(file_bytes, target_lang, progress_bar, status_box):
             except Exception:
                 pass
 
-    status_box.info(f"Összesen {len(all_elements)} db szöveg megtalálva. Fordítás a Geminivel...")
+    status_box.info(f"Összesen {len(all_elements)} db szöveg megtalálva. Fordítás...")
     progress_bar.progress(35)
 
-    # 2. Lépés: Lefordítjuk az egyedi szövegeket kötegelve
     unique_to_translate = [txt for _, _, txt in all_elements]
     translation_map = translate_batch(unique_to_translate, target_lang)
     progress_bar.progress(85)
 
-    # 3. Lépés: Visszaírjuk a lefordított értékeket
     count = 0
     for filename, elem, orig_txt in all_elements:
         if orig_txt in translation_map and translation_map[orig_txt] != orig_txt:
             elem.text = translation_map[orig_txt]
             count += 1
 
-    # 4. Lépés: Újracsomagolás
     for item in in_zip.infolist():
         if item.filename in parsed_files:
             new_bytes = ET.tostring(parsed_files[item.filename], encoding='utf-8', xml_declaration=True)
@@ -229,14 +243,14 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
             if shape.has_text_frame:
                 for p in shape.text_frame.paragraphs:
                     for run in p.runs:
-                        if is_translatable(run.text):
+                        if run.text.strip():
                             all_runs.append(run)
             if shape.has_table:
                 for row in shape.table.rows:
                     for cell in row.cells:
                         for p in cell.text_frame.paragraphs:
                             for run in p.runs:
-                                if is_translatable(run.text):
+                                if run.text.strip():
                                     all_runs.append(run)
 
     status_box.info(f"PowerPoint diák fordítása ({len(all_runs)} elem)...")
@@ -258,7 +272,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count
 
-# Felhasználói felület
+# UI
 uploaded_file = st.file_uploader(
     "1. Húzd ide vagy válaszd ki a fájlt",
     type=["docx", "xlsx", "pptx"],
