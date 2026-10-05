@@ -3,3 +3,4 @@ openpyxl
 python-docx
 python-pptx
 google-generativeai
+deep-translator
