@@ -1,6 +1,5 @@
 import io
 import os
-import json
 import streamlit as st
 import google.generativeai as genai
 import openpyxl
@@ -14,7 +13,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# Egyedi stílus
+# Egyedi felület stílus
 st.markdown("""
     <style>
     .main-title { font-size: 2.2rem; font-weight: 700; margin-bottom: 0.2rem; }
@@ -51,52 +50,55 @@ LANGUAGES = {
 # API kulcs ellenőrzése
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 if not gemini_key:
-    st.error("⚠️ Hiányzik a GEMINI_API_KEY a Secrets beállításokból!")
+    st.error("⚠️ Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból!")
     st.stop()
 
 genai.configure(api_key=gemini_key)
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction=(
-        "You are an expert industrial, TPM, and business document translator. "
-        "Translate the input accurately into the requested language. "
-        "Keep standard technical abbreviations intact (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR). "
-        "Always maintain numbering, bullet marks, and line breaks."
-    )
-)
+model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+
+SEP = " ||| "
 
 def batch_translate(texts_to_translate, target_lang):
-    """Kötegelt fordítás JSON formátumban a gyorsaság és stabilitás érdekében."""
+    """Biztonságos kötegelt fordítás szeparátoros felosztással."""
     if not texts_to_translate:
         return {}
-    
-    unique_texts = list(set(texts_to_translate))
+
+    unique_texts = list(set([t for t in texts_to_translate if t and len(t.strip()) > 1]))
     results = {}
-    batch_size = 40  # 40 szövegrészlet egyszerre egy kérésben
+    batch_size = 25  # 25 mondat blokkonként a stabilitásért
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
+        combined_text = SEP.join(chunk)
+
         prompt = (
-            f"Target Language: {target_lang}\n"
-            "Translate each value in the following JSON array into the target language. "
-            "Return ONLY a valid JSON array of strings in the exact same order. No explanation, no markdown wrap.\n"
-            f"{json.dumps(chunk, ensure_ascii=False)}"
+            f"You are a professional industrial, technical, TPM, and business translator.\n"
+            f"Translate the following segments accurately into {target_lang}.\n"
+            f"CRITICAL INSTRUCTIONS:\n"
+            f"1. The input segments are separated by '{SEP}'.\n"
+            f"2. You MUST return the translations separated by EXACTLY the same separator: '{SEP}'.\n"
+            f"3. Return EXACTLY {len(chunk)} segments. Do not merge or split them.\n"
+            f"4. Keep standard technical acronyms intact (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI).\n"
+            f"5. Return ONLY the translated segments separated by '{SEP}'. Do NOT include introductory words or commentary.\n\n"
+            f"Segments to translate:\n{combined_text}"
         )
+
         try:
             response = model.generate_content(prompt)
-            raw = response.text.strip()
-            if raw.startswith("```json"):
-                raw = raw[7:]
-            if raw.startswith("```"):
-                raw = raw[3:]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            translated_chunk = json.loads(raw.strip())
+            translated_parts = response.text.strip().split(SEP)
             
-            for orig, trans in zip(chunk, translated_chunk):
-                results[orig] = trans
-        except Exception:
-            # Hiba esetén megtartjuk az eredetit
+            # Ha pontosan megegyezik a darabszám
+            if len(translated_parts) == len(chunk):
+                for orig, trans in zip(chunk, translated_parts):
+                    results[orig] = trans.strip()
+            else:
+                # Tartalék megoldás: egyesével fordítja le ezt a blokkot
+                for item in chunk:
+                    p_single = f"Translate to {target_lang}. Return ONLY translated text:\n{item}"
+                    r_single = model.generate_content(p_single)
+                    results[item] = r_single.text.strip()
+        except Exception as e:
+            st.warning(f"Figyelmeztetés a Gemini API hívásnál: {e}")
             for orig in chunk:
                 results[orig] = orig
 
@@ -125,7 +127,7 @@ def process_docx(file_bytes, target_lang, progress_bar):
     progress_bar.progress(30)
     texts_to_send = [txt for _, txt in all_runs]
     trans_map = batch_translate(texts_to_send, target_lang)
-    progress_bar.progress(80)
+    progress_bar.progress(85)
 
     for run_obj, orig_txt in all_runs:
         if orig_txt in trans_map:
@@ -136,7 +138,7 @@ def process_docx(file_bytes, target_lang, progress_bar):
     progress_bar.progress(100)
     return out_stream.getvalue()
 
-# Excel feldolgozás (összevont és speciális cellák kezelésével)
+# Excel feldolgozás
 def process_xlsx(file_bytes, target_lang, progress_bar):
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
     target_cells = []
@@ -153,7 +155,7 @@ def process_xlsx(file_bytes, target_lang, progress_bar):
     progress_bar.progress(30)
     texts_to_send = [txt for _, txt in target_cells]
     trans_map = batch_translate(texts_to_send, target_lang)
-    progress_bar.progress(80)
+    progress_bar.progress(85)
 
     for cell_obj, orig_txt in target_cells:
         if orig_txt in trans_map:
@@ -189,7 +191,7 @@ def process_pptx(file_bytes, target_lang, progress_bar):
     progress_bar.progress(30)
     texts_to_send = [txt for _, txt in all_runs]
     trans_map = batch_translate(texts_to_send, target_lang)
-    progress_bar.progress(80)
+    progress_bar.progress(85)
 
     for run_obj, orig_txt in all_runs:
         if orig_txt in trans_map:
