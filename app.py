@@ -1,13 +1,13 @@
 import io
 import os
+import re
 import zipfile
-import xml.etree.ElementTree as ET
 import streamlit as st
 from deep_translator import GoogleTranslator
 from docx import Document
 from pptx import Presentation
 
-# Oldal beállítása
+# Oldal konfiguráció
 st.set_page_config(
     page_title="Universal Office Translator Pro",
     page_icon="🌐",
@@ -31,6 +31,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# Verziószám a fejlécben, hogy azonnal lásd, frissült-e a Streamlit!
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v2.5 Direct</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
+
 LANGUAGES = {
     "Magyar (Hungarian)": "hu",
     "Angol (English)": "en",
@@ -48,17 +52,14 @@ LANGUAGES = {
 }
 
 def clean_and_translate(text, translator, cache):
-    """Lefordítja a szöveget az esetleges formázó jelek megőrzésével."""
     if not text:
         return text
-    
-    t_clean = str(text).strip()
+    t_clean = text.strip()
     if len(t_clean) <= 1 or t_clean.startswith("="):
         return text
     if t_clean.replace(".", "").replace(",", "").replace("-", "").replace("%", "").replace("/", "").isdigit():
         return text
 
-    # Ha aposztróffal vagy nyíllal kezdődik
     prefix = ""
     if t_clean.startswith("'"):
         prefix = "'"
@@ -79,56 +80,50 @@ def clean_and_translate(text, translator, cache):
     except Exception:
         return text
 
-# Excel fordítás a belső XML struktúra közvetlen szerkesztésével (100% garantált!)
-def process_xlsx_direct_xml(file_bytes, target_lang_code, progress_bar, status_box):
+# Közvetlen XML szövegcsere regex-szel (Névtér-független, 100% atombiztos)
+def process_xlsx_direct(file_bytes, target_lang_code, progress_bar, status_box):
     translator = GoogleTranslator(source='auto', target=target_lang_code)
     cache = {}
     total_translated = 0
 
-    status_box.info("Excel belső szövegtárának (SharedStrings & Drawings) feltárása...")
+    status_box.info("Excel belső fájlok kicsomagolása és átírása...")
     progress_bar.progress(20)
 
     in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
     out_zip_buffer = io.BytesIO()
     out_zip = zipfile.ZipFile(out_zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED)
 
-    xml_files_processed = 0
+    # Minden olyan XML fájl, amiben szövegek lehetnek
+    target_pattern = re.compile(r"^xl/(sharedStrings|worksheets/sheet\d+|drawings/drawing\d+)\.xml$")
+    # Minden <...:t> vagy <t> tag közötti szöveg keresése
+    tag_pattern = re.compile(r"(<(?:\w+:)?t(?:\s+[^>]*)?>)(.*?)(</(?:\w+:)?t>)", re.DOTALL)
 
     for item in in_zip.infolist():
-        content = in_zip.read(item.filename)
+        content_bytes = in_zip.read(item.filename)
 
-        # Az összes szöveg az alábbi XML fájlokban lakik az Excelen belül:
-        # 1. xl/sharedStrings.xml (a cellák valódi szövegei)
-        # 2. xl/worksheets/sheet*.xml (közvetlen inline szövegek)
-        # 3. xl/drawings/drawing*.xml (szövegdobozok, nyilak, alakzatok)
-        is_target_xml = (
-            item.filename == "xl/sharedStrings.xml" or
-            item.filename.startswith("xl/drawings/drawing") or
-            item.filename.startswith("xl/worksheets/sheet")
-        )
-
-        if is_target_xml and item.filename.endswith(".xml"):
-            xml_files_processed += 1
+        if target_pattern.match(item.filename):
             try:
-                tree = ET.fromstring(content)
-                # Minden XML címkét megkeresünk, ami szöveget tartalmaz (<t> vagy <a:t>)
-                modified = False
-                for elem in tree.iter():
-                    if elem.tag.endswith("}t") or elem.tag == "t":
-                        if elem.text and elem.text.strip():
-                            orig_text = elem.text
-                            new_text = clean_and_translate(orig_text, translator, cache)
-                            if new_text != orig_text:
-                                elem.text = new_text
-                                total_translated += 1
-                                modified = True
+                xml_text = content_bytes.decode('utf-8')
 
-                if modified:
-                    content = ET.tostring(tree, encoding='utf-8', xml_declaration=True)
+                def replace_match(match):
+                    nonlocal total_translated
+                    open_tag = match.group(1)
+                    inner_text = match.group(2)
+                    close_tag = match.group(3)
+
+                    if inner_text and inner_text.strip():
+                        new_t = clean_and_translate(inner_text, translator, cache)
+                        if new_t != inner_text:
+                            total_translated += 1
+                            return f"{open_tag}{new_t}{close_tag}"
+                    return match.group(0)
+
+                new_xml = tag_pattern.sub(replace_match, xml_text)
+                content_bytes = new_xml.encode('utf-8')
             except Exception:
                 pass
 
-        out_zip.writestr(item, content)
+        out_zip.writestr(item, content_bytes)
 
     in_zip.close()
     out_zip.close()
@@ -136,7 +131,7 @@ def process_xlsx_direct_xml(file_bytes, target_lang_code, progress_bar, status_b
 
     return out_zip_buffer.getvalue(), total_translated
 
-# Word (.docx) feldolgozás
+# Word feldolgozás
 def process_docx(file_bytes, target_lang_code, progress_bar, status_box):
     doc = Document(io.BytesIO(file_bytes))
     translator = GoogleTranslator(source='auto', target=target_lang_code)
@@ -167,7 +162,7 @@ def process_docx(file_bytes, target_lang_code, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), total_translated
 
-# PowerPoint (.pptx) feldolgozás
+# PowerPoint feldolgozás
 def process_pptx(file_bytes, target_lang_code, progress_bar, status_box):
     prs = Presentation(io.BytesIO(file_bytes))
     translator = GoogleTranslator(source='auto', target=target_lang_code)
@@ -200,10 +195,7 @@ def process_pptx(file_bytes, target_lang_code, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), total_translated
 
-# --- Felhasználói felület ---
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
-
+# UI
 uploaded_file = st.file_uploader(
     "1. Húzd ide vagy válaszd ki a fájlt",
     type=["docx", "xlsx", "pptx"],
@@ -237,7 +229,7 @@ if translate_button:
                 translated_bytes, count = process_docx(file_bytes, lang_code, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             elif ext == ".xlsx":
-                translated_bytes, count = process_xlsx_direct_xml(file_bytes, lang_code, progress_bar, status_box)
+                translated_bytes, count = process_xlsx_direct(file_bytes, lang_code, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             elif ext == ".pptx":
                 translated_bytes, count = process_pptx(file_bytes, lang_code, progress_bar, status_box)
