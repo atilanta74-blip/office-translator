@@ -50,22 +50,39 @@ LANGUAGES = {
 # API kulcs ellenőrzése
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 if not gemini_key:
-    st.error("⚠️ Hiányzik a GEMINI_API_KEY a Streamlit Secrets beállításokból!")
+    st.error("⚠️ Hiányzik a GEMINI_API_KEY a Secrets beállításokból!")
     st.stop()
 
 genai.configure(api_key=gemini_key)
-model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+
+# Automatikus kompatibilis modell kiválasztása
+available_models = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-pro"]
+model = None
+
+for m_name in available_models:
+    try:
+        test_model = genai.GenerativeModel(model_name=m_name)
+        # Gyors teszt kérés
+        test_model.generate_content("ping")
+        model = test_model
+        break
+    except Exception:
+        continue
+
+if model is None:
+    # Végső tartalékként a garantált alaptípus
+    model = genai.GenerativeModel(model_name="gemini-pro")
 
 SEP = " ||| "
 
 def batch_translate(texts_to_translate, target_lang):
-    """Biztonságos kötegelt fordítás szeparátoros felosztással."""
+    """Kötegelt fordítás szeparátoros technikával."""
     if not texts_to_translate:
         return {}
 
     unique_texts = list(set([t for t in texts_to_translate if t and len(t.strip()) > 1]))
     results = {}
-    batch_size = 25  # 25 mondat blokkonként a stabilitásért
+    batch_size = 20
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
@@ -73,34 +90,39 @@ def batch_translate(texts_to_translate, target_lang):
 
         prompt = (
             f"You are a professional industrial, technical, TPM, and business translator.\n"
-            f"Translate the following segments accurately into {target_lang}.\n"
-            f"CRITICAL INSTRUCTIONS:\n"
+            f"Translate each of the following text segments into {target_lang}.\n"
+            f"RULES:\n"
             f"1. The input segments are separated by '{SEP}'.\n"
             f"2. You MUST return the translations separated by EXACTLY the same separator: '{SEP}'.\n"
-            f"3. Return EXACTLY {len(chunk)} segments. Do not merge or split them.\n"
-            f"4. Keep standard technical acronyms intact (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI).\n"
-            f"5. Return ONLY the translated segments separated by '{SEP}'. Do NOT include introductory words or commentary.\n\n"
-            f"Segments to translate:\n{combined_text}"
+            f"3. Return EXACTLY {len(chunk)} translated segments in the same order.\n"
+            f"4. Keep standard manufacturing acronyms unchanged (e.g., OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN).\n"
+            f"5. Return ONLY the translated segments with the separators. No explanations or extra commentary.\n\n"
+            f"Texts to translate:\n{combined_text}"
         )
 
         try:
             response = model.generate_content(prompt)
             translated_parts = response.text.strip().split(SEP)
-            
-            # Ha pontosan megegyezik a darabszám
+
             if len(translated_parts) == len(chunk):
                 for orig, trans in zip(chunk, translated_parts):
                     results[orig] = trans.strip()
             else:
-                # Tartalék megoldás: egyesével fordítja le ezt a blokkot
                 for item in chunk:
+                    try:
+                        p_single = f"Translate to {target_lang}. Return ONLY translated text:\n{item}"
+                        r_single = model.generate_content(p_single)
+                        results[item] = r_single.text.strip()
+                    except Exception:
+                        results[item] = item
+        except Exception:
+            for item in chunk:
+                try:
                     p_single = f"Translate to {target_lang}. Return ONLY translated text:\n{item}"
                     r_single = model.generate_content(p_single)
                     results[item] = r_single.text.strip()
-        except Exception as e:
-            st.warning(f"Figyelmeztetés a Gemini API hívásnál: {e}")
-            for orig in chunk:
-                results[orig] = orig
+                except Exception:
+                    results[item] = item
 
     return results
 
@@ -148,7 +170,6 @@ def process_xlsx(file_bytes, target_lang, progress_bar):
             for cell in row:
                 if cell.value is not None:
                     val_str = str(cell.value).strip()
-                    # Képletek kihagyása, csak valódi szövegek fordítása
                     if not val_str.startswith("=") and not val_str.replace(".", "").replace(",", "").isdigit() and len(val_str) > 1:
                         target_cells.append((cell, val_str))
 
@@ -202,7 +223,7 @@ def process_pptx(file_bytes, target_lang, progress_bar):
     progress_bar.progress(100)
     return out_stream.getvalue()
 
-# --- Felhasználói felület ---
+# --- Felület (UI) ---
 st.markdown('<div class="main-title">🌐 Office Document Translator Pro</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Gemini AI által vezérelt, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
@@ -259,7 +280,7 @@ if translate_button:
 
         except Exception as e:
             progress_bar.empty()
-            status_text.error(f"Hiba történt a fordítás során: {e}")
+            status_text.error(f"Hiba történt a feldolgozás során: {e}")
 
 st.markdown("""
     <div class="footer-bar">
