@@ -1,5 +1,6 @@
 import io
 import os
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 import streamlit as st
@@ -31,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v4.5 Flash</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v5.0 Flash-3.8</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -58,78 +59,52 @@ if not gemini_key:
 
 genai.configure(api_key=gemini_key)
 
-# A Google API által kért pontos modellek listája sorrendben
-CANDIDATE_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash-8b",
-    "gemini-1.5-pro",
-    "gemini-pro"
-]
-
-active_model = None
-for m_name in CANDIDATE_MODELS:
-    try:
-        test_m = genai.GenerativeModel(model_name=m_name)
-        test_m.generate_content("test")
-        active_model = test_m
-        break
-    except Exception:
-        continue
-
-if not active_model:
-    # Ha a fenti lista valamiért nem indulna el, a dinamikus lista első aktív generáló modellje:
-    try:
-        for m in genai.list_models():
-            if "generateContent" in m.supported_generation_methods:
-                active_model = genai.GenerativeModel(model_name=m.name)
-                break
-    except Exception:
-        pass
-
-if not active_model:
-    st.error("⚠️ Nem sikerült elérhető Gemini modellt inicializálni az API kulccsal.")
-    st.stop()
+# Közvetlenül a Google által megadott modellnév
+MODEL_NAME = "gemini-3.8-flash"
+model = genai.GenerativeModel(model_name=MODEL_NAME)
 
 SEP = " ###|||### "
 
 def translate_batch(texts, target_lang):
-    """Kötegelt szakfordítás közvetlenül a Gemini modellel."""
+    """Kötegelt fordítás a kijelölt Gemini 3.8 Flash modellel."""
     if not texts:
         return {}
-    
+
     unique_texts = list(set(texts))
     results = {}
-    batch_size = 20
+    batch_size = 15
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
         combined = SEP.join(chunk)
 
         prompt = (
-            f"You are a professional technical and industrial translator.\n"
-            f"Translate the following text items into {target_lang}.\n"
-            f"The input items are separated by '{SEP}'.\n"
-            f"Return EXACTLY {len(chunk)} translated items in the exact same order, separated by '{SEP}'.\n"
-            f"Keep abbreviations intact (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI).\n"
-            f"Return ONLY the translated items separated by '{SEP}'. Do not include notes or explanations.\n\n"
+            f"You are a professional industrial and business document translator.\n"
+            f"Translate the following items into {target_lang}.\n"
+            f"Input items are separated by '{SEP}'.\n"
+            f"You MUST return EXACTLY {len(chunk)} translated items in the exact same sequence, separated by '{SEP}'.\n"
+            f"Keep abbreviations intact (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN).\n"
+            f"Return ONLY the translated items separated by '{SEP}'. No introductions, no notes.\n\n"
             f"{combined}"
         )
 
         try:
-            resp = active_model.generate_content(prompt)
+            resp = model.generate_content(prompt)
             parts = resp.text.strip().split(SEP)
             if len(parts) == len(chunk):
                 for o, t in zip(chunk, parts):
                     results[o] = t.strip()
             else:
                 for o in chunk:
-                    r = active_model.generate_content(f"Translate accurately to {target_lang}. Return ONLY translated text:\n{o}")
+                    r = model.generate_content(f"Translate accurately to {target_lang}. Return ONLY translated text:\n{o}")
                     results[o] = r.text.strip()
+                    time.sleep(0.1)
         except Exception as e:
-            st.warning(f"API hiba: {e}")
+            st.warning(f"API hiba ({MODEL_NAME}): {e}")
             for o in chunk:
                 results[o] = o
+        
+        time.sleep(0.2)
 
     return results
 
@@ -170,7 +145,7 @@ def process_xlsx_gemini(file_bytes, target_lang, progress_bar, status_box):
             except Exception:
                 pass
 
-    status_box.info(f"Összesen {len(all_elements)} db szöveg megtalálva. Fordítás...")
+    status_box.info(f"Összesen {len(all_elements)} db szöveg megtalálva. Fordítás a Gemini 3.8 Flash modellel...")
     progress_bar.progress(35)
 
     unique_to_translate = [txt for _, _, txt in all_elements]
@@ -272,7 +247,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count
 
-# UI
+# Felhasználói felület
 uploaded_file = st.file_uploader(
     "1. Húzd ide vagy válaszd ki a fájlt",
     type=["docx", "xlsx", "pptx"],
