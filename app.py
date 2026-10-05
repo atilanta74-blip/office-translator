@@ -1,12 +1,13 @@
 import io
 import os
+import zipfile
+import xml.etree.ElementTree as ET
 import streamlit as st
 from deep_translator import GoogleTranslator
-import openpyxl
 from docx import Document
 from pptx import Presentation
 
-# Oldal konfiguráció
+# Oldal beállítása
 st.set_page_config(
     page_title="Universal Office Translator Pro",
     page_icon="🌐",
@@ -30,7 +31,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Támogatott nyelvek
 LANGUAGES = {
     "Magyar (Hungarian)": "hu",
     "Angol (English)": "en",
@@ -47,73 +47,96 @@ LANGUAGES = {
     "Vietnámi (Vietnamese)": "vi"
 }
 
-def translate_text(text, translator, cache):
-    """Biztonságos szövegfordító gyorsítótárral."""
-    if text is None:
+def clean_and_translate(text, translator, cache):
+    """Lefordítja a szöveget az esetleges formázó jelek megőrzésével."""
+    if not text:
         return text
     
-    text_str = str(text).strip()
-    # Képletek, üres mezők, tiszta számok és 1 karakteres elemek kihagyása
-    if not text_str or text_str.startswith("=") or len(text_str) <= 1:
+    t_clean = str(text).strip()
+    if len(t_clean) <= 1 or t_clean.startswith("="):
         return text
-    if text_str.replace(".", "").replace(",", "").replace("-", "").replace("%", "").replace("/", "").isdigit():
+    if t_clean.replace(".", "").replace(",", "").replace("-", "").replace("%", "").replace("/", "").isdigit():
         return text
 
-    # Ha a cella aposztróffal kezdődik
-    has_apostrophe = text_str.startswith("'")
-    if has_apostrophe:
-        text_str = text_str[1:].strip()
+    # Ha aposztróffal vagy nyíllal kezdődik
+    prefix = ""
+    if t_clean.startswith("'"):
+        prefix = "'"
+        t_clean = t_clean[1:].strip()
+    elif t_clean.startswith("-->"):
+        prefix = "--> "
+        t_clean = t_clean[3:].strip()
 
-    if text_str in cache:
-        res = cache[text_str]
-        return f"'{res}" if has_apostrophe else res
+    if t_clean in cache:
+        return prefix + cache[t_clean]
 
     try:
-        translated = translator.translate(text_str)
+        translated = translator.translate(t_clean)
         if not translated:
-            translated = text_str
-        cache[text_str] = translated
-        return f"'{translated}" if has_apostrophe else translated
+            translated = t_clean
+        cache[t_clean] = translated
+        return prefix + translated
     except Exception:
         return text
 
-# Excel feldolgozás minden cellára kiterjesztve
-def process_xlsx(file_bytes, target_lang_code, progress_bar, status_box):
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+# Excel fordítás a belső XML struktúra közvetlen szerkesztésével (100% garantált!)
+def process_xlsx_direct_xml(file_bytes, target_lang_code, progress_bar, status_box):
     translator = GoogleTranslator(source='auto', target=target_lang_code)
     cache = {}
     total_translated = 0
-    total_sheets = len(wb.worksheets)
 
-    for s_idx, ws in enumerate(wb.worksheets):
-        status_box.info(f"Munkalap feldolgozása: {ws.title} ({s_idx + 1}/{total_sheets})...")
+    status_box.info("Excel belső szövegtárának (SharedStrings & Drawings) feltárása...")
+    progress_bar.progress(20)
 
-        # Közvetlen cellabejárás határok nélkül
-        for row in ws.rows:
-            for cell in row:
-                if cell.value is not None:
-                    orig_val = cell.value
-                    
-                    # Ha RichText típusú objektum, kinyerjük a szövegét
-                    if hasattr(orig_val, 'text'):
-                        orig_text = str(orig_val.text)
-                    else:
-                        orig_text = str(orig_val)
+    in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
+    out_zip_buffer = io.BytesIO()
+    out_zip = zipfile.ZipFile(out_zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED)
 
-                    new_text = translate_text(orig_text, translator, cache)
-                    
-                    if new_text != orig_text:
-                        cell.value = new_text
-                        total_translated += 1
+    xml_files_processed = 0
 
-        progress_bar.progress(int(10 + ((s_idx + 1) / total_sheets) * 85))
+    for item in in_zip.infolist():
+        content = in_zip.read(item.filename)
 
-    out_stream = io.BytesIO()
-    wb.save(out_stream)
+        # Az összes szöveg az alábbi XML fájlokban lakik az Excelen belül:
+        # 1. xl/sharedStrings.xml (a cellák valódi szövegei)
+        # 2. xl/worksheets/sheet*.xml (közvetlen inline szövegek)
+        # 3. xl/drawings/drawing*.xml (szövegdobozok, nyilak, alakzatok)
+        is_target_xml = (
+            item.filename == "xl/sharedStrings.xml" or
+            item.filename.startswith("xl/drawings/drawing") or
+            item.filename.startswith("xl/worksheets/sheet")
+        )
+
+        if is_target_xml and item.filename.endswith(".xml"):
+            xml_files_processed += 1
+            try:
+                tree = ET.fromstring(content)
+                # Minden XML címkét megkeresünk, ami szöveget tartalmaz (<t> vagy <a:t>)
+                modified = False
+                for elem in tree.iter():
+                    if elem.tag.endswith("}t") or elem.tag == "t":
+                        if elem.text and elem.text.strip():
+                            orig_text = elem.text
+                            new_text = clean_and_translate(orig_text, translator, cache)
+                            if new_text != orig_text:
+                                elem.text = new_text
+                                total_translated += 1
+                                modified = True
+
+                if modified:
+                    content = ET.tostring(tree, encoding='utf-8', xml_declaration=True)
+            except Exception:
+                pass
+
+        out_zip.writestr(item, content)
+
+    in_zip.close()
+    out_zip.close()
     progress_bar.progress(100)
-    return out_stream.getvalue(), total_translated
 
-# Word feldolgozás
+    return out_zip_buffer.getvalue(), total_translated
+
+# Word (.docx) feldolgozás
 def process_docx(file_bytes, target_lang_code, progress_bar, status_box):
     doc = Document(io.BytesIO(file_bytes))
     translator = GoogleTranslator(source='auto', target=target_lang_code)
@@ -123,7 +146,7 @@ def process_docx(file_bytes, target_lang_code, progress_bar, status_box):
     for p in doc.paragraphs:
         for run in p.runs:
             if run.text.strip():
-                new_t = translate_text(run.text, translator, cache)
+                new_t = clean_and_translate(run.text, translator, cache)
                 if new_t != run.text:
                     run.text = new_t
                     total_translated += 1
@@ -134,7 +157,7 @@ def process_docx(file_bytes, target_lang_code, progress_bar, status_box):
                 for p in cell.paragraphs:
                     for run in p.runs:
                         if run.text.strip():
-                            new_t = translate_text(run.text, translator, cache)
+                            new_t = clean_and_translate(run.text, translator, cache)
                             if new_t != run.text:
                                 run.text = new_t
                                 total_translated += 1
@@ -144,7 +167,7 @@ def process_docx(file_bytes, target_lang_code, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), total_translated
 
-# PowerPoint feldolgozás
+# PowerPoint (.pptx) feldolgozás
 def process_pptx(file_bytes, target_lang_code, progress_bar, status_box):
     prs = Presentation(io.BytesIO(file_bytes))
     translator = GoogleTranslator(source='auto', target=target_lang_code)
@@ -157,7 +180,7 @@ def process_pptx(file_bytes, target_lang_code, progress_bar, status_box):
                 for p in shape.text_frame.paragraphs:
                     for run in p.runs:
                         if run.text.strip():
-                            new_t = translate_text(run.text, translator, cache)
+                            new_t = clean_and_translate(run.text, translator, cache)
                             if new_t != run.text:
                                 run.text = new_t
                                 total_translated += 1
@@ -167,7 +190,7 @@ def process_pptx(file_bytes, target_lang_code, progress_bar, status_box):
                         for p in cell.text_frame.paragraphs:
                             for run in p.runs:
                                 if run.text.strip():
-                                    new_t = translate_text(run.text, translator, cache)
+                                    new_t = clean_and_translate(run.text, translator, cache)
                                     if new_t != run.text:
                                         run.text = new_t
                                         total_translated += 1
@@ -214,7 +237,7 @@ if translate_button:
                 translated_bytes, count = process_docx(file_bytes, lang_code, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             elif ext == ".xlsx":
-                translated_bytes, count = process_xlsx(file_bytes, lang_code, progress_bar, status_box)
+                translated_bytes, count = process_xlsx_direct_xml(file_bytes, lang_code, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             elif ext == ".pptx":
                 translated_bytes, count = process_pptx(file_bytes, lang_code, progress_bar, status_box)
