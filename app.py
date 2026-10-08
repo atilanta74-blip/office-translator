@@ -1,6 +1,7 @@
 import io
 import os
 import json
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 import streamlit as st
@@ -32,7 +33,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v5.5 MegaBatch</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v5.6 Balanced</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -66,15 +67,15 @@ model = genai.GenerativeModel(
 )
 
 def translate_mega_batch(texts, target_lang):
-    """Minden egyedi szöveg lefordítása mindössze 1-2 kérésből a kvótamegőrzésért."""
+    """Kiegyensúlyozott csomagméret (40 db), hogy elkerüljük az 504 Timeout hibát."""
     if not texts:
         return {}
 
     unique_texts = list(set(texts))
     results = {}
     
-    # Akár 150 szöveg egyszerre egyetlen hívásban!
-    batch_size = 120
+    # 40 szöveg csomagonként: gyors, megbízható és nem fut ki az időből
+    batch_size = 40
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
@@ -88,7 +89,11 @@ def translate_mega_batch(texts, target_lang):
         )
 
         try:
-            resp = model.generate_content(prompt)
+            # request_options timeout növeléssel
+            resp = model.generate_content(
+                prompt,
+                request_options={"timeout": 120}
+            )
             data = json.loads(resp.text.strip())
             if isinstance(data, dict):
                 results.update(data)
@@ -96,9 +101,11 @@ def translate_mega_batch(texts, target_lang):
                 for orig, trans in zip(chunk, data):
                     results[orig] = trans
         except Exception as e:
-            st.warning(f"Gemini API figyelmeztetés: {e}")
+            st.warning(f"Gemini API figyelmeztetés (csomag {i // batch_size + 1}): {e}")
             for o in chunk:
                 results[o] = o
+        
+        time.sleep(0.3)
 
     return results
 
@@ -139,7 +146,7 @@ def process_xlsx_gemini(file_bytes, target_lang, progress_bar, status_box):
             except Exception:
                 pass
 
-    status_box.info(f"Összesen {len(all_elements)} db szöveg összegyűjtve. 1 lépéses Gemini fordítás...")
+    status_box.info(f"Összesen {len(all_elements)} db szöveg összegyűjtve. Fordítás folyamatban...")
     progress_bar.progress(40)
 
     unique_to_translate = [txt for _, _, txt in all_elements]
@@ -180,7 +187,7 @@ def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
             for cell in row.cells:
                 for p in cell.paragraphs:
                     for run in p.runs:
-                        if is_translatable(run.text):
+                        if run.text.strip():
                             all_runs.append(run)
 
     status_box.info(f"Word szövegek összegyűjtve ({len(all_runs)} elem). Fordítás...")
@@ -219,7 +226,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
                     for cell in row.cells:
                         for p in cell.text_frame.paragraphs:
                             for run in p.runs:
-                                if run.text.strip():
+                                if is_translatable(run.text):
                                     all_runs.append(run)
 
     status_box.info(f"PowerPoint diák összegyűjtve ({len(all_runs)} elem). Fordítás...")
@@ -241,7 +248,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count
 
-# UI
+# Felhasználói felület
 uploaded_file = st.file_uploader(
     "1. Húzd ide vagy válaszd ki a fájlt",
     type=["docx", "xlsx", "pptx"],
