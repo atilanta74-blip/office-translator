@@ -1,6 +1,5 @@
 import io
 import os
-import json
 import time
 import zipfile
 import xml.etree.ElementTree as ET
@@ -33,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v5.6 Balanced</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v5.7 FastList</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -52,7 +51,6 @@ LANGUAGES = {
     "Vietnámi (Vietnamese)": "Vietnamese"
 }
 
-# API kulcs ellenőrzése
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 if not gemini_key:
     st.error("⚠️ Hiányzik a GEMINI_API_KEY a Secrets beállításokból!")
@@ -60,52 +58,74 @@ if not gemini_key:
 
 genai.configure(api_key=gemini_key)
 
+# Közvetlen modell inicializálás
 MODEL_NAME = "gemini-3.8-flash"
-model = genai.GenerativeModel(
-    model_name=MODEL_NAME,
-    generation_config={"response_mime_type": "application/json"}
-)
+model = genai.GenerativeModel(model_name=MODEL_NAME)
 
-def translate_mega_batch(texts, target_lang):
-    """Kiegyensúlyozott csomagméret (40 db), hogy elkerüljük az 504 Timeout hibát."""
+def translate_batch_fast(texts, target_lang):
+    """Gyors soronkénti fordítás számozott listával a timeout elkerülésére."""
     if not texts:
         return {}
 
     unique_texts = list(set(texts))
     results = {}
-    
-    # 40 szöveg csomagonként: gyors, megbízható és nem fut ki az időből
-    batch_size = 40
+    batch_size = 20  # Optimális méret: nem fut ki a határidőből
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
         
+        # Számozott lista előállítása
+        lines_input = "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(chunk)])
         prompt = (
-            f"You are a professional industrial, TPM, and technical document translator.\n"
-            f"Translate each string in the input JSON array into {target_lang}.\n"
-            f"Keep abbreviations (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN) intact.\n"
-            f"Return a JSON object where keys are the original strings and values are the translated strings.\n\n"
-            f"Input JSON:\n{json.dumps(chunk, ensure_ascii=False)}"
+            f"You are a professional industrial, TPM, and technical translator.\n"
+            f"Translate each numbered item into {target_lang}.\n"
+            f"Rules:\n"
+            f"- Preserve numbering like [1], [2], etc.\n"
+            f"- Keep technical terms/acronyms intact (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN).\n"
+            f"- Return ONLY the translated numbered list, exactly {len(chunk)} lines.\n\n"
+            f"{lines_input}"
         )
 
-        try:
-            # request_options timeout növeléssel
-            resp = model.generate_content(
-                prompt,
-                request_options={"timeout": 120}
-            )
-            data = json.loads(resp.text.strip())
-            if isinstance(data, dict):
-                results.update(data)
-            elif isinstance(data, list) and len(data) == len(chunk):
-                for orig, trans in zip(chunk, data):
-                    results[orig] = trans
-        except Exception as e:
-            st.warning(f"Gemini API figyelmeztetés (csomag {i // batch_size + 1}): {e}")
+        success = False
+        for attempt in range(2):  # 1 automata újrapróbálkozás ha hálózati hiba lépne fel
+            try:
+                resp = model.generate_content(prompt, request_options={"timeout": 60})
+                raw_lines = resp.text.strip().split("\n")
+                
+                # Eredmények párosítása
+                parsed_translations = {}
+                for line in raw_lines:
+                    line = line.strip()
+                    if line.startswith("[") and "]" in line:
+                        idx_str = line[1:line.find("]")].strip()
+                        if idx_str.isdigit():
+                            idx_val = int(idx_str) - 1
+                            trans_content = line[line.find("]")+1:].strip()
+                            if 0 <= idx_val < len(chunk):
+                                parsed_translations[idx_val] = trans_content
+
+                if len(parsed_translations) == len(chunk):
+                    for idx_val, orig in enumerate(chunk):
+                        results[orig] = parsed_translations[idx_val]
+                    success = True
+                    break
+                else:
+                    # Ha a számozás eltért, sorrend szerint rendeljük hozzá
+                    valid_lines = [l for l in raw_lines if l.strip()]
+                    if len(valid_lines) == len(chunk):
+                        for orig, line in zip(chunk, valid_lines):
+                            cleaned = line[line.find("]")+1:].strip() if "]" in line else line.strip()
+                            results[orig] = cleaned
+                        success = True
+                        break
+            except Exception:
+                time.sleep(1.0)
+
+        if not success:
             for o in chunk:
                 results[o] = o
         
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     return results
 
@@ -146,11 +166,11 @@ def process_xlsx_gemini(file_bytes, target_lang, progress_bar, status_box):
             except Exception:
                 pass
 
-    status_box.info(f"Összesen {len(all_elements)} db szöveg összegyűjtve. Fordítás folyamatban...")
-    progress_bar.progress(40)
+    status_box.info(f"Összesen {len(all_elements)} db szöveg összegyűjtve. Gyors Gemini fordítás folyamatban...")
+    progress_bar.progress(35)
 
     unique_to_translate = [txt for _, _, txt in all_elements]
-    translation_map = translate_mega_batch(unique_to_translate, target_lang)
+    translation_map = translate_batch_fast(unique_to_translate, target_lang)
     progress_bar.progress(85)
 
     count = 0
@@ -187,14 +207,14 @@ def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
             for cell in row.cells:
                 for p in cell.paragraphs:
                     for run in p.runs:
-                        if run.text.strip():
+                        if is_translatable(run.text):
                             all_runs.append(run)
 
     status_box.info(f"Word szövegek összegyűjtve ({len(all_runs)} elem). Fordítás...")
-    progress_bar.progress(40)
+    progress_bar.progress(35)
 
     texts = [r.text.strip() for r in all_runs]
-    t_map = translate_mega_batch(texts, target_lang)
+    t_map = translate_batch_fast(texts, target_lang)
     progress_bar.progress(85)
 
     count = 0
@@ -219,21 +239,21 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
             if shape.has_text_frame:
                 for p in shape.text_frame.paragraphs:
                     for run in p.runs:
-                        if is_translatable(run.text):
+                        if run.text.strip():
                             all_runs.append(run)
             if shape.has_table:
                 for row in shape.table.rows:
                     for cell in row.cells:
                         for p in cell.text_frame.paragraphs:
                             for run in p.runs:
-                                if is_translatable(run.text):
+                                if run.text.strip():
                                     all_runs.append(run)
 
     status_box.info(f"PowerPoint diák összegyűjtve ({len(all_runs)} elem). Fordítás...")
-    progress_bar.progress(40)
+    progress_bar.progress(35)
 
     texts = [r.text.strip() for r in all_runs]
-    t_map = translate_mega_batch(texts, target_lang)
+    t_map = translate_batch_fast(texts, target_lang)
     progress_bar.progress(85)
 
     count = 0
@@ -248,7 +268,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count
 
-# Felhasználói felület
+# UI
 uploaded_file = st.file_uploader(
     "1. Húzd ide vagy válaszd ki a fájlt",
     type=["docx", "xlsx", "pptx"],
