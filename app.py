@@ -33,7 +33,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v8.0 Master</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v8.5 ExactMap</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -62,93 +62,84 @@ MODEL_NAME = "gemini-3.8-flash"
 model = genai.GenerativeModel(model_name=MODEL_NAME)
 
 def has_letters(text):
-    """Ellenőrzi, hogy van-e a szövegben lefordítandó betű."""
     if not text:
         return False
     t = text.strip()
     if len(t) <= 1 or t.startswith("="):
         return False
-    # Ha van benne bármilyen betűkarakter
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
-def translate_batch(texts, target_lang):
-    """Kötegelt fordítás soronként, stabil visszatöltéssel."""
+def translate_batch_json(texts, target_lang, status_box):
+    """Biztonságos kötegelt fordítás JSON tömbként 15-ös csomagokban."""
     if not texts:
         return {}
 
     unique_texts = list(set(texts))
     results = {}
-    batch_size = 25
+    batch_size = 15
+    total_batches = (len(unique_texts) + batch_size - 1) // batch_size
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
-        
-        # Sortörések védelme
-        cleaned_chunk = [t.replace("\r\n", " [BR] ").replace("\n", " [BR] ") for t in chunk]
-        numbered_input = "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(cleaned_chunk)])
-        
+        batch_num = (i // batch_size) + 1
+        status_box.info(f"Gemini AI fordítás folyamatban: {batch_num}/{total_batches} csomag...")
+
+        # JSON tömb formátum
         prompt = (
-            f"You are a professional industrial, technical, TPM, and business translator.\n"
-            f"Translate each numbered line accurately into {target_lang}.\n"
-            f"CRITICAL RULES:\n"
-            f"1. Preserve the line markers exactly: [1], [2], etc.\n"
-            f"2. Keep the placeholder '[BR]' unchanged where present.\n"
-            f"3. Keep all technical acronyms unchanged (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
-            f"4. Return EXACTLY {len(chunk)} translated numbered lines. Return ONLY the list, nothing else.\n\n"
-            f"{numbered_input}"
+            f"You are a professional industrial, TPM, and technical translator.\n"
+            f"Translate each string in the input JSON list into {target_lang}.\n"
+            f"Rules:\n"
+            f"1. Keep technical acronyms intact (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR).\n"
+            f"2. Return ONLY a valid JSON array of translated strings in the EXACT same order and length.\n"
+            f"3. No markdown code blocks, no backticks, no comments.\n\n"
+            f"Input JSON:\n{json.dumps(chunk, ensure_ascii=False)}"
         )
 
         success = False
-        for _ in range(2):
+        for attempt in range(2):
             try:
-                resp = model.generate_content(prompt, request_options={"timeout": 60})
-                lines = resp.text.strip().split("\n")
+                resp = model.generate_content(prompt, request_options={"timeout": 45})
+                raw_text = resp.text.strip()
+                # Esetleges markdown jelek levágása
+                if raw_text.startswith("```json"):
+                    raw_text = raw_text[7:]
+                if raw_text.startswith("```"):
+                    raw_text = raw_text[3:]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text[:-3]
                 
-                parsed = {}
-                for line in lines:
-                    line_s = line.strip()
-                    if line_s.startswith("[") and "]" in line_s:
-                        idx_part = line_s[1:line_s.find("]")].strip()
-                        if idx_part.isdigit():
-                            idx_num = int(idx_part) - 1
-                            trans_txt = line_s[line_s.find("]")+1:].strip()
-                            if 0 <= idx_num < len(chunk):
-                                parsed[idx_num] = trans_txt.replace("[BR]", "\n")
-
-                if len(parsed) == len(chunk):
-                    for idx_num, orig in enumerate(chunk):
-                        results[orig] = parsed[idx_num]
+                translated_list = json.loads(raw_text.strip())
+                if isinstance(translated_list, list) and len(translated_list) == len(chunk):
+                    for orig, trans in zip(chunk, translated_list):
+                        results[orig] = str(trans).strip()
                     success = True
                     break
-                else:
-                    valid_lines = [l.strip() for l in lines if l.strip()]
-                    if len(valid_lines) == len(chunk):
-                        for orig, l in zip(chunk, valid_lines):
-                            c = l[l.find("]")+1:].strip() if "]" in l else l.strip()
-                            results[orig] = c.replace("[BR]", "\n")
-                        success = True
-                        break
-            except Exception:
-                time.sleep(0.8)
+            except Exception as e:
+                time.sleep(1.0)
 
+        # Ha a JSON valamiért nem sikerült, soronkénti tartalék megoldás erre a kis csomagra
         if not success:
-            for o in chunk:
-                results[o] = o
+            for orig in chunk:
+                try:
+                    p_single = f"Translate accurately to {target_lang}. Keep acronyms intact. Return ONLY the translated string:\n{orig}"
+                    r_single = model.generate_content(p_single, request_options={"timeout": 20})
+                    results[orig] = r_single.text.strip()
+                except Exception:
+                    results[orig] = orig
         
         time.sleep(0.2)
 
     return results
 
-# Minden belső XML szöveges címke felismerése regex-szel
+# Teljeskörű, pontos XML visszacserélés
 def process_xlsx_full(file_bytes, target_lang, progress_bar, status_box):
-    status_box.info("Excel szövegek kinyerése...")
+    status_box.info("Excel belső szövegtár kinyerése...")
     progress_bar.progress(15)
 
     in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
     out_zip_buffer = io.BytesIO()
     out_zip = zipfile.ZipFile(out_zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED)
 
-    # Minden olyan címke, ami szöveget hordoz az OpenXML-ben (<t>, <a:t>, <m:t>, stb.)
     tag_pattern = re.compile(r"(<(?:\w+:)?t(?:\s+[^>]*)?>)(.*?)(</(?:\w+:)?t>)", re.DOTALL)
 
     target_files = []
@@ -156,7 +147,6 @@ def process_xlsx_full(file_bytes, target_lang, progress_bar, status_box):
 
     for item in in_zip.infolist():
         fn = item.filename
-        # Munkalapok, rajzok, és sharedStrings
         if fn == "xl/sharedStrings.xml" or fn.startswith("xl/worksheets/sheet") or fn.startswith("xl/drawings/drawing"):
             if fn.endswith(".xml"):
                 target_files.append(fn)
@@ -169,7 +159,7 @@ def process_xlsx_full(file_bytes, target_lang, progress_bar, status_box):
     status_box.info(f"Összesen {len(texts_to_translate)} db szöveges elem megtalálva. Fordítás...")
     progress_bar.progress(35)
 
-    t_map = translate_batch(texts_to_translate, target_lang)
+    t_map = translate_batch_json(texts_to_translate, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
@@ -185,11 +175,11 @@ def process_xlsx_full(file_bytes, target_lang, progress_bar, status_box):
                 text_val = match.group(2)
                 suffix = match.group(3)
                 stripped = text_val.strip()
+
                 if stripped in t_map and t_map[stripped] != stripped:
                     count += 1
                     leading_space = text_val[:len(text_val) - len(text_val.lstrip())]
                     trailing_space = text_val[len(text_val.rstrip()):]
-                    # XML entitások biztonságos kezelése
                     trans = (t_map[stripped]
                              .replace("&", "&amp;")
                              .replace("<", "&lt;")
@@ -230,7 +220,7 @@ def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(35)
 
     texts = [r.text.strip() for r in all_runs]
-    t_map = translate_batch(texts, target_lang)
+    t_map = translate_batch_json(texts, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
@@ -269,7 +259,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(35)
 
     texts = [r.text.strip() for r in all_runs]
-    t_map = translate_batch(texts, target_lang)
+    t_map = translate_batch_json(texts, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
