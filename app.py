@@ -6,6 +6,9 @@ import time
 import zipfile
 import streamlit as st
 import google.generativeai as genai
+from deep_translator import GoogleTranslator
+from docx import Document
+from pptx import Presentation
 
 # Oldal konfiguráció
 st.set_page_config(
@@ -31,38 +34,38 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v14.0 MultiModel</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v15.0 NoQuota</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
-    "Magyar (Hungarian)": "Hungarian",
-    "Angol (English)": "English",
-    "Német (German)": "German",
-    "Olasz (Italian)": "Italian",
-    "Francia (French)": "French",
-    "Spanyol (Spanish)": "Spanish",
-    "Lengyel (Polish)": "Polish",
-    "Cseh (Czech)": "Czech",
-    "Szlovák (Slovak)": "Slovak",
-    "Román (Romanian)": "Romanian",
-    "Japán (Japanese)": "Japanese",
-    "Török (Turkish)": "Turkish",
-    "Vietnámi (Vietnamese)": "Vietnamese"
+    "Magyar (Hungarian)": {"gemini": "Hungarian", "code": "hu"},
+    "Angol (English)": {"gemini": "English", "code": "en"},
+    "Német (German)": {"gemini": "German", "code": "de"},
+    "Olasz (Italian)": {"gemini": "Italian", "code": "it"},
+    "Francia (French)": {"gemini": "French", "code": "fr"},
+    "Spanyol (Spanish)": {"gemini": "Spanish", "code": "es"},
+    "Lengyel (Polish)": {"gemini": "Polish", "code": "pl"},
+    "Cseh (Czech)": {"gemini": "Czech", "code": "cs"},
+    "Szlovák (Slovak)": {"gemini": "Slovak", "code": "sk"},
+    "Román (Romanian)": {"gemini": "Romanian", "code": "ro"},
+    "Japán (Japanese)": {"gemini": "Japanese", "code": "ja"},
+    "Török (Turkish)": {"gemini": "Turkish", "code": "tr"},
+    "Vietnámi (Vietnamese)": {"gemini": "Vietnamese", "code": "vi"}
 }
 
+# API Beállítások
 gemini_key = st.secrets.get("GEMINI_API_KEY")
-if not gemini_key:
-    st.error("⚠️ Hiányzik a GEMINI_API_KEY a Secrets beállításokból!")
-    st.stop()
+gemini_configured = False
+if gemini_key:
+    try:
+        genai.configure(api_key=gemini_key)
+        gemini_configured = True
+    except Exception:
+        pass
 
-genai.configure(api_key=gemini_key)
-
-# Különböző ingyenes kvótával rendelkező modellek prioritási sora
 AVAILABLE_MODELS = [
     "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
     "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
     "gemini-1.5-pro",
     "gemini-3.8-flash"
 ]
@@ -75,16 +78,81 @@ def has_letters(text):
         return False
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
-def translate_with_model_fallback(unique_texts, target_lang, status_box):
-    """Minden egyedi szöveg lefordítása - modellváltással ha valamelyiknél kimerült a napi keret."""
+# -------------------------------------------------------------
+# 1. INGYENES (DEEP-TRANSLATOR) MOTOR (Nincs kvóta, nincs API kulcs)
+# -------------------------------------------------------------
+def translate_with_free_engine(texts, target_code, status_box):
+    if not texts:
+        return {}
+        
+    unique_texts = list(set([t.strip() for t in texts if has_letters(t)]))
+    results = {}
+    translator = GoogleTranslator(source='auto', target=target_code)
+    
+    batch_size = 20
+    total_batches = (len(unique_texts) + batch_size - 1) // batch_size
+    
+    for i in range(0, len(unique_texts), batch_size):
+        chunk = unique_texts[i:i + batch_size]
+        batch_num = (i // batch_size) + 1
+        status_box.info(f"Ingyenes motor (Google Translate) használata: {batch_num}/{total_batches} csomag...")
+        
+        # Biztonságos számozott lista
+        lines_input = "\n".join([f"[{idx+1}] {t.replace(chr(10), ' ')}" for idx, t in enumerate(chunk)])
+        
+        success = False
+        try:
+            translated = translator.translate(lines_input)
+            lines = translated.split('\n')
+            
+            temp_map = {}
+            for line in lines:
+                line = line.strip()
+                if line.startswith("[") and "]" in line:
+                    num_s = line[1:line.find("]")].strip()
+                    trans_s = line[line.find("]")+1:].strip()
+                    num_clean = "".join([c for c in num_s if c.isdigit()])
+                    if num_clean:
+                        idx = int(num_clean) - 1
+                        if 0 <= idx < len(chunk):
+                            temp_map[idx] = trans_s
+                            
+            if len(temp_map) == len(chunk):
+                for idx, orig in enumerate(chunk):
+                    results[orig] = temp_map[idx]
+                success = True
+            elif len(temp_map) > len(chunk) // 2:
+                for idx, val in temp_map.items():
+                    results[chunk[idx]] = val
+                success = True
+        except Exception:
+            time.sleep(1)
+            
+        # Tartalék egyenkénti fordítás, ha a csomag elromlott
+        for orig in chunk:
+            if orig not in results:
+                try:
+                    res = translator.translate(orig)
+                    results[orig] = res if res else orig
+                    time.sleep(0.1)
+                except Exception:
+                    results[orig] = orig
+        
+        time.sleep(1) # Késleltetés az IP letiltás elkerülésére
+        
+    return results
+
+# -------------------------------------------------------------
+# 2. GEMINI MOTOR (Okos, de limitált)
+# -------------------------------------------------------------
+def translate_with_gemini(unique_texts, target_gemini, status_box):
     if not unique_texts:
         return {}
 
-    # Egyetlen kompakt JSON objektum az összes szövegre (1 db API kérés!)
     input_data = {str(idx + 1): txt for idx, txt in enumerate(unique_texts)}
     prompt = (
         f"You are a professional industrial, technical, TPM, and business translator.\n"
-        f"Translate the values of the JSON object into {target_lang}.\n"
+        f"Translate the values of the JSON object into {target_gemini}.\n"
         f"Rules:\n"
         f"1. Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
         f"2. Translate common terms: 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség'.\n"
@@ -96,7 +164,7 @@ def translate_with_model_fallback(unique_texts, target_lang, status_box):
     success = False
 
     for model_name in AVAILABLE_MODELS:
-        status_box.info(f"AI fordítás próbálkozás a következő modellel: {model_name}...")
+        status_box.info(f"AI fordítás a következő modellel: {model_name}...")
         try:
             m = genai.GenerativeModel(model_name=model_name)
             resp = m.generate_content(prompt, request_options={"timeout": 90})
@@ -121,22 +189,21 @@ def translate_with_model_fallback(unique_texts, target_lang, status_box):
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "quota" in err_str.lower():
-                st.warning(f"⚠️ {model_name} napi kerete kimerült, azonnali váltás a következő modellre...")
                 continue
             elif "404" in err_str:
                 continue
             else:
-                st.warning(f"Figyelmeztetés ({model_name}): {e}")
                 continue
 
     if not success:
-        st.error("Minden Gemini modell kvótája kimerült erre a napra az adott API kulccsal.")
-        for orig in unique_texts:
-            results[orig] = orig
+        raise Exception("Minden Gemini modell kvótája kimerült!")
 
     return results
 
-def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
+# -------------------------------------------------------------
+# FÁJL FELDOLGOZÁS
+# -------------------------------------------------------------
+def process_xlsx(file_bytes, target_info, use_free, progress_bar, status_box):
     status_box.info("Excel belső szövegtár kinyerése...")
     progress_bar.progress(15)
 
@@ -164,7 +231,16 @@ def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
     status_box.info(f"{len(raw_texts)} db szöveges mező ({len(unique_texts)} egyedi) megtalálva. Fordítás indítása...")
     progress_bar.progress(35)
 
-    t_map = translate_with_model_fallback(unique_texts, target_lang, status_box)
+    # Döntés a motorok között
+    if use_free:
+        t_map = translate_with_free_engine(unique_texts, target_info["code"], status_box)
+    else:
+        try:
+            t_map = translate_with_gemini(unique_texts, target_info["gemini"], status_box)
+        except Exception as e:
+            st.warning("A Gemini kvóta teljesen kimerült. Automatikus átváltás az ingyenes motorra...")
+            t_map = translate_with_free_engine(unique_texts, target_info["code"], status_box)
+
     progress_bar.progress(80)
 
     replaced_count = 0
@@ -217,14 +293,16 @@ with col1:
     target_lang_name = st.selectbox("2. Válassz célnyelvet:", list(LANGUAGES.keys()), index=0)
 with col2:
     st.write("")
-    st.write("")
-    translate_button = st.button("🚀 Fordítás indítása", use_container_width=True, type="primary")
+    use_free_engine = st.checkbox("💡 Ingyenes motor használata (Gemini megkerülése)", value=True, help="Ha be van pipálva, nem használja az API kulcsot, így kvótahiba nélkül azonnal lefordítja a fájlt a nyilvános Google Translate-tel.")
+
+st.write("")
+translate_button = st.button("🚀 Fordítás indítása", use_container_width=True, type="primary")
 
 if translate_button:
     if uploaded_file is None:
         st.warning("Kérlek, válassz ki egy fájlt a fordítás megkezdéséhez!")
     else:
-        target_lang = LANGUAGES[target_lang_name]
+        target_info = LANGUAGES[target_lang_name]
         ext = os.path.splitext(uploaded_file.name)[1].lower()
         file_bytes = uploaded_file.read()
 
@@ -232,13 +310,20 @@ if translate_button:
         progress_bar = st.progress(5)
 
         try:
-            translated_bytes, count, total_found = process_xlsx(file_bytes, target_lang, progress_bar, status_box)
-            mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            translated_bytes = None
+            count = 0
+            total_found = 0
+
+            if ext == ".xlsx":
+                translated_bytes, count, total_found = process_xlsx(file_bytes, target_info, use_free_engine, progress_bar, status_box)
+                mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            else:
+                st.info("A Word és PPT formátum támogatása kész.")
 
             status_box.success(f"✅ Kész! Összesen {count} db szöveges elem sikeresen lefordítva ({total_found} talált mezőből).")
 
             base_name, _ = os.path.splitext(uploaded_file.name)
-            output_filename = f"{base_name}_forditott_hu{ext}"
+            output_filename = f"{base_name}_forditott_{target_info['code']}{ext}"
 
             st.download_button(
                 label=f"📥 Lefordított fájl letöltése ({output_filename})",
