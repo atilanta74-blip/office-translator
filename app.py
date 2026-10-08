@@ -2,9 +2,9 @@ import io
 import os
 import re
 import time
+import zipfile
 import streamlit as st
 import google.generativeai as genai
-import openpyxl
 from docx import Document
 from pptx import Presentation
 
@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v10.0 Final</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v11.0 UltraWorks</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -63,14 +63,13 @@ model = genai.GenerativeModel(model_name=MODEL_NAME)
 def has_letters(text):
     if not text:
         return False
-    t = str(text).strip()
+    t = text.strip()
     if len(t) <= 1 or t.startswith("="):
         return False
-    # Ha van benne legalább egy betű
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
-def translate_batch_list(texts, target_lang, status_box):
-    """Megbízható kötegelt fordítás számozott listával."""
+def translate_batch_safe(texts, target_lang, status_box):
+    """Biztonságos kötegelt fordítás 'LineNumber ||| Text' formátummal."""
     if not texts:
         return {}
 
@@ -82,20 +81,20 @@ def translate_batch_list(texts, target_lang, status_box):
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
         batch_num = (i // batch_size) + 1
-        status_box.info(f"Fordítás folyamatban: {batch_num}/{total_batches} csomag ({len(chunk)} elem)...")
+        status_box.info(f"Gemini fordítás: {batch_num}/{total_batches} csomag ({len(chunk)} szöveg)...")
 
         prepared_chunk = [t.replace("\r\n", " [BR] ").replace("\n", " [BR] ") for t in chunk]
-        lines_input = "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(prepared_chunk)])
+        lines_input = "\n".join([f"{idx+1} ||| {t}" for idx, t in enumerate(prepared_chunk)])
 
         prompt = (
-            f"You are a professional industrial, TPM, and technical translator.\n"
-            f"Translate each numbered line accurately into {target_lang}.\n"
-            f"CRITICAL RULES:\n"
-            f"1. Preserve numbering: [1], [2], etc.\n"
-            f"2. Keep '[BR]' unchanged where present (it represents line breaks).\n"
-            f"3. Keep technical acronyms unchanged (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
-            f"4. Translate standard pillar roles: 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv'.\n"
-            f"5. Return EXACTLY {len(chunk)} lines.\n\n"
+            f"You are a professional industrial, technical, and TPM translator.\n"
+            f"Translate the text after '|||' in each line into {target_lang}.\n"
+            f"Rules:\n"
+            f"- Output format strictly: LineNumber ||| TranslatedText\n"
+            f"- Keep '[BR]' unchanged where present (represents line breaks).\n"
+            f"- Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR).\n"
+            f"- Translate standard terms: 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség'.\n"
+            f"- Return EXACTLY {len(chunk)} lines.\n\n"
             f"{lines_input}"
         )
 
@@ -103,41 +102,38 @@ def translate_batch_list(texts, target_lang, status_box):
         for attempt in range(2):
             try:
                 resp = model.generate_content(prompt, request_options={"timeout": 60})
-                raw_lines = resp.text.strip().split("\n")
-                parsed = {}
-                for line in raw_lines:
-                    line = line.strip()
-                    if line.startswith("[") and "]" in line:
-                        idx_str = line[1:line.find("]")].strip()
-                        if idx_str.isdigit():
-                            idx_val = int(idx_str) - 1
-                            trans_content = line[line.find("]")+1:].strip()
-                            if 0 <= idx_val < len(chunk):
-                                parsed[idx_val] = trans_content.replace("[BR]", "\n")
+                lines = resp.text.strip().split("\n")
+                temp_map = {}
+                for line in lines:
+                    if "|||" in line:
+                        parts = line.split("|||", 1)
+                        num_s = parts[0].strip()
+                        trans_s = parts[1].strip()
+                        if num_s.isdigit():
+                            idx = int(num_s) - 1
+                            if 0 <= idx < len(chunk):
+                                temp_map[idx] = trans_s.replace("[BR]", "\n")
 
-                if len(parsed) == len(chunk):
-                    for idx_val, orig in enumerate(chunk):
-                        results[orig] = parsed[idx_val]
+                if len(temp_map) == len(chunk):
+                    for idx, orig in enumerate(chunk):
+                        results[orig] = temp_map[idx]
                     success = True
                     break
-                else:
-                    valid_lines = [l for l in raw_lines if l.strip()]
-                    if len(valid_lines) == len(chunk):
-                        for orig, l in zip(chunk, valid_lines):
-                            cleaned = l[l.find("]")+1:].strip() if "]" in l else l.strip()
-                            results[orig] = cleaned.replace("[BR]", "\n")
-                        success = True
-                        break
+                elif len(temp_map) > 0:
+                    for idx, val in temp_map.items():
+                        results[chunk[idx]] = val
+                    success = True
+                    break
             except Exception:
                 time.sleep(1.0)
 
-        # Tartalék egyedi lekérés, ha a köteg nem jött volna vissza
+        # Tartalék lefedés
         for orig in chunk:
             if orig not in results:
                 try:
-                    p_s = f"Translate accurately to {target_lang}. Keep acronyms intact. Return ONLY the translated string:\n{orig}"
-                    r_s = model.generate_content(p_s, request_options={"timeout": 15})
-                    results[orig] = r_s.text.strip()
+                    p = f"Translate accurately to {target_lang}. Return ONLY translation:\n{orig}"
+                    r = model.generate_content(p, request_options={"timeout": 15})
+                    results[orig] = r.text.strip()
                 except Exception:
                     results[orig] = orig
 
@@ -145,45 +141,75 @@ def translate_batch_list(texts, target_lang, status_box):
 
     return results
 
-# Tiszta, formátummegőrző Excel fordítás
-def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
-    status_box.info("Excel cellák és munkalapok bejárása...")
+# A bevált v7.0 UltraSafe architektúra kiterjesztése az összes munkalapra és rajzra
+def process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box):
+    status_box.info("Excel szövegtár kinyerése...")
     progress_bar.progress(15)
 
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
-    
-    # 1. Összes szöveg összegyűjtése a cellákból
-    cells_to_process = []  # (sheet, row, col, orig_text)
-    texts_to_translate = []
+    in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
+    out_zip_buffer = io.BytesIO()
+    out_zip = zipfile.ZipFile(out_zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED)
 
-    for ws in wb.worksheets:
-        for row in ws.iter_rows():
-            for cell in row:
-                if cell.value is not None:
-                    val_str = str(cell.value)
-                    if has_letters(val_str):
-                        cells_to_process.append((cell, val_str.strip()))
-                        texts_to_translate.append(val_str.strip())
+    # Univerzális regex, ami elkapja a sima <t>, az <a:t> és az <xml:space="preserve"> tageket is
+    tag_pattern = re.compile(r"(<(?:\w+:)?t(?:\s+[^>]*)?>)(.*?)(</(?:\w+:)?t>)", re.DOTALL)
 
-    status_box.info(f"Összesen {len(texts_to_translate)} db szöveges mező megtalálva. Fordítás...")
+    target_files = []
+    found_texts = []
+
+    for item in in_zip.infolist():
+        fn = item.filename
+        if fn == "xl/sharedStrings.xml" or fn.startswith("xl/worksheets/sheet") or fn.startswith("xl/drawings/drawing"):
+            if fn.endswith(".xml"):
+                target_files.append(fn)
+                content_str = in_zip.read(fn).decode('utf-8', errors='ignore')
+                for m in tag_pattern.finditer(content_str):
+                    val = m.group(2)
+                    if val and has_letters(val):
+                        found_texts.append(val.strip())
+
+    status_box.info(f"{len(found_texts)} db szöveg megtalálva. Fordítás...")
     progress_bar.progress(35)
 
-    # 2. Fordítás
-    t_map = translate_batch_list(texts_to_translate, target_lang, status_box)
-    progress_bar.progress(80)
+    t_map = translate_batch_safe(found_texts, target_lang, status_box)
+    progress_bar.progress(85)
 
-    # 3. Értékek visszaírása a cellákba a formázás és típus megtartásával
     count = 0
-    for cell, orig_val in cells_to_process:
-        if orig_val in t_map and t_map[orig_val] != orig_val:
-            cell.value = t_map[orig_val]
-            count += 1
+    for item in in_zip.infolist():
+        content_bytes = in_zip.read(item.filename)
 
-    out_stream = io.BytesIO()
-    wb.save(out_stream)
+        if item.filename in target_files:
+            content_str = content_bytes.decode('utf-8', errors='ignore')
+
+            def replace_text(match):
+                nonlocal count
+                prefix = match.group(1)
+                text_val = match.group(2)
+                suffix = match.group(3)
+
+                stripped = text_val.strip()
+                if stripped in t_map:
+                    trans = t_map[stripped]
+                    if trans and trans != stripped:
+                        count += 1
+                        leading = text_val[:len(text_val) - len(text_val.lstrip())]
+                        trailing = text_val[len(text_val.rstrip()):]
+                        safe_trans = (trans
+                                      .replace("&", "&amp;")
+                                      .replace("<", "&lt;")
+                                      .replace(">", "&gt;"))
+                        return f"{prefix}{leading}{safe_trans}{trailing}{suffix}"
+                return match.group(0)
+
+            new_str = tag_pattern.sub(replace_text, content_str)
+            content_bytes = new_str.encode('utf-8')
+
+        out_zip.writestr(item, content_bytes)
+
+    in_zip.close()
+    out_zip.close()
     progress_bar.progress(100)
 
-    return out_stream.getvalue(), count
+    return out_zip_buffer.getvalue(), count
 
 # Word feldolgozás
 def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
@@ -207,7 +233,7 @@ def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(35)
 
     texts = [r.text.strip() for r in all_runs]
-    t_map = translate_batch_list(texts, target_lang, status_box)
+    t_map = translate_batch_safe(texts, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
@@ -246,7 +272,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(35)
 
     texts = [r.text.strip() for r in all_runs]
-    t_map = translate_batch_list(texts, target_lang, status_box)
+    t_map = translate_batch_safe(texts, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
@@ -295,7 +321,7 @@ if translate_button:
                 translated_bytes, count = process_docx_gemini(file_bytes, target_lang, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             elif ext == ".xlsx":
-                translated_bytes, count = process_xlsx(file_bytes, target_lang, progress_bar, status_box)
+                translated_bytes, count = process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             elif ext == ".pptx":
                 translated_bytes, count = process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box)
