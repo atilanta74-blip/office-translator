@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import json
 import time
 import zipfile
 import streamlit as st
@@ -32,7 +33,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v11.0 UltraWorks</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v12.0 Turbo</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -68,81 +69,59 @@ def has_letters(text):
         return False
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
-def translate_batch_safe(texts, target_lang, status_box):
-    """Biztonságos kötegelt fordítás 'LineNumber ||| Text' formátummal."""
-    if not texts:
+def translate_all_texts(unique_texts, target_lang, status_box):
+    """Lefordítja az összes egyedi szöveget minimális számú API hívással."""
+    if not unique_texts:
         return {}
 
-    unique_texts = list(set([t.strip() for t in texts if has_letters(t)]))
     results = {}
-    batch_size = 20
+    batch_size = 50  # 50-es csomag: mindössze 2-3 kérés az egész fájlra!
     total_batches = (len(unique_texts) + batch_size - 1) // batch_size
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
         batch_num = (i // batch_size) + 1
-        status_box.info(f"Gemini fordítás: {batch_num}/{total_batches} csomag ({len(chunk)} szöveg)...")
+        status_box.info(f"AI fordítás: {batch_num}/{total_batches} csomag feldolgozása...")
 
-        prepared_chunk = [t.replace("\r\n", " [BR] ").replace("\n", " [BR] ") for t in chunk]
-        lines_input = "\n".join([f"{idx+1} ||| {t}" for idx, t in enumerate(prepared_chunk)])
+        # Készítünk egy egyszerű JSON dictionary-t a promptnak
+        input_data = {str(idx + 1): txt for idx, txt in enumerate(chunk)}
 
         prompt = (
-            f"You are a professional industrial, technical, and TPM translator.\n"
-            f"Translate the text after '|||' in each line into {target_lang}.\n"
+            f"You are a professional industrial, technical, TPM, and business translator.\n"
+            f"Translate the values of the JSON object into {target_lang}.\n"
             f"Rules:\n"
-            f"- Output format strictly: LineNumber ||| TranslatedText\n"
-            f"- Keep '[BR]' unchanged where present (represents line breaks).\n"
-            f"- Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR).\n"
-            f"- Translate standard terms: 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség'.\n"
-            f"- Return EXACTLY {len(chunk)} lines.\n\n"
-            f"{lines_input}"
+            f"1. Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
+            f"2. Translate common terms: 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség'.\n"
+            f"3. Return ONLY a valid JSON object with the exact same keys ('1', '2', etc.) and the translated values. Do not wrap in markdown or backticks.\n\n"
+            f"{json.dumps(input_data, ensure_ascii=False)}"
         )
 
-        success = False
-        for attempt in range(2):
-            try:
-                resp = model.generate_content(prompt, request_options={"timeout": 60})
-                lines = resp.text.strip().split("\n")
-                temp_map = {}
-                for line in lines:
-                    if "|||" in line:
-                        parts = line.split("|||", 1)
-                        num_s = parts[0].strip()
-                        trans_s = parts[1].strip()
-                        if num_s.isdigit():
-                            idx = int(num_s) - 1
-                            if 0 <= idx < len(chunk):
-                                temp_map[idx] = trans_s.replace("[BR]", "\n")
+        try:
+            resp = model.generate_content(prompt, request_options={"timeout": 60})
+            raw_text = resp.text.strip()
+            if raw_text.startswith("```json"):
+                raw_text = raw_text[7:]
+            if raw_text.startswith("```"):
+                raw_text = raw_text[3:]
+            if raw_text.endswith("```"):
+                raw_text = raw_text[:-3]
 
-                if len(temp_map) == len(chunk):
-                    for idx, orig in enumerate(chunk):
-                        results[orig] = temp_map[idx]
-                    success = True
-                    break
-                elif len(temp_map) > 0:
-                    for idx, val in temp_map.items():
-                        results[chunk[idx]] = val
-                    success = True
-                    break
-            except Exception:
-                time.sleep(1.0)
+            parsed_json = json.loads(raw_text.strip())
+            for idx, orig in enumerate(chunk):
+                k = str(idx + 1)
+                if k in parsed_json and parsed_json[k]:
+                    results[orig] = str(parsed_json[k]).strip()
+        except Exception as e:
+            st.warning(f"API válasz hiba a(z) {batch_num}. csomagnál: {e}")
+            # Ha a JSON parsing nem sikerült, próbáljuk soronként feloldani
+            for orig in chunk:
+                results[orig] = orig
 
-        # Tartalék lefedés
-        for orig in chunk:
-            if orig not in results:
-                try:
-                    p = f"Translate accurately to {target_lang}. Return ONLY translation:\n{orig}"
-                    r = model.generate_content(p, request_options={"timeout": 15})
-                    results[orig] = r.text.strip()
-                except Exception:
-                    results[orig] = orig
-
-        time.sleep(0.2)
+        time.sleep(0.3)
 
     return results
 
-# A bevált v7.0 UltraSafe architektúra kiterjesztése az összes munkalapra és rajzra
-def process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box):
+def process_xlsx_turbo(file_bytes, target_lang, progress_bar, status_box):
     status_box.info("Excel szövegtár kinyerése...")
     progress_bar.progress(15)
 
@@ -150,11 +129,10 @@ def process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box):
     out_zip_buffer = io.BytesIO()
     out_zip = zipfile.ZipFile(out_zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED)
 
-    # Univerzális regex, ami elkapja a sima <t>, az <a:t> és az <xml:space="preserve"> tageket is
     tag_pattern = re.compile(r"(<(?:\w+:)?t(?:\s+[^>]*)?>)(.*?)(</(?:\w+:)?t>)", re.DOTALL)
 
     target_files = []
-    found_texts = []
+    raw_texts = []
 
     for item in in_zip.infolist():
         fn = item.filename
@@ -165,15 +143,16 @@ def process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box):
                 for m in tag_pattern.finditer(content_str):
                     val = m.group(2)
                     if val and has_letters(val):
-                        found_texts.append(val.strip())
+                        raw_texts.append(val.strip())
 
-    status_box.info(f"{len(found_texts)} db szöveg megtalálva. Fordítás...")
+    unique_texts = list(set(raw_texts))
+    status_box.info(f"{len(raw_texts)} db szöveges mező ({len(unique_texts)} egyedi) megtalálva. Fordítás indítása...")
     progress_bar.progress(35)
 
-    t_map = translate_batch_safe(found_texts, target_lang, status_box)
-    progress_bar.progress(85)
+    t_map = translate_all_texts(unique_texts, target_lang, status_box)
+    progress_bar.progress(80)
 
-    count = 0
+    replaced_count = 0
     for item in in_zip.infolist():
         content_bytes = in_zip.read(item.filename)
 
@@ -181,7 +160,7 @@ def process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box):
             content_str = content_bytes.decode('utf-8', errors='ignore')
 
             def replace_text(match):
-                nonlocal count
+                nonlocal replaced_count
                 prefix = match.group(1)
                 text_val = match.group(2)
                 suffix = match.group(3)
@@ -190,7 +169,7 @@ def process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box):
                 if stripped in t_map:
                     trans = t_map[stripped]
                     if trans and trans != stripped:
-                        count += 1
+                        replaced_count += 1
                         leading = text_val[:len(text_val) - len(text_val.lstrip())]
                         trailing = text_val[len(text_val.rstrip()):]
                         safe_trans = (trans
@@ -209,9 +188,9 @@ def process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box):
     out_zip.close()
     progress_bar.progress(100)
 
-    return out_zip_buffer.getvalue(), count
+    return out_zip_buffer.getvalue(), replaced_count, len(raw_texts)
 
-# Word feldolgozás
+# Word (.docx) feldolgozás
 def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
     doc = Document(io.BytesIO(file_bytes))
     all_runs = []
@@ -232,8 +211,8 @@ def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
     status_box.info(f"Word szövegek fordítása ({len(all_runs)} elem)...")
     progress_bar.progress(35)
 
-    texts = [r.text.strip() for r in all_runs]
-    t_map = translate_batch_safe(texts, target_lang, status_box)
+    unique_texts = list(set([r.text.strip() for r in all_runs]))
+    t_map = translate_all_texts(unique_texts, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
@@ -246,9 +225,9 @@ def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
     out_stream = io.BytesIO()
     doc.save(out_stream)
     progress_bar.progress(100)
-    return out_stream.getvalue(), count
+    return out_stream.getvalue(), count, len(all_runs)
 
-# PowerPoint feldolgozás
+# PowerPoint (.pptx) feldolgozás
 def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     prs = Presentation(io.BytesIO(file_bytes))
     all_runs = []
@@ -265,14 +244,14 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
                     for cell in row.cells:
                         for p in cell.text_frame.paragraphs:
                             for run in p.runs:
-                                if run.text.strip():
+                                if has_letters(run.text):
                                     all_runs.append(run)
 
     status_box.info(f"PowerPoint diák fordítása ({len(all_runs)} elem)...")
     progress_bar.progress(35)
 
-    texts = [r.text.strip() for r in all_runs]
-    t_map = translate_batch_safe(texts, target_lang, status_box)
+    unique_texts = list(set([r.text.strip() for r in all_runs]))
+    t_map = translate_all_texts(unique_texts, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
@@ -285,7 +264,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     out_stream = io.BytesIO()
     prs.save(out_stream)
     progress_bar.progress(100)
-    return out_stream.getvalue(), count
+    return out_stream.getvalue(), count, len(all_runs)
 
 # UI
 uploaded_file = st.file_uploader(
@@ -316,18 +295,19 @@ if translate_button:
         try:
             translated_bytes = None
             count = 0
+            total_found = 0
 
             if ext == ".docx":
-                translated_bytes, count = process_docx_gemini(file_bytes, target_lang, progress_bar, status_box)
+                translated_bytes, count, total_found = process_docx_gemini(file_bytes, target_lang, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             elif ext == ".xlsx":
-                translated_bytes, count = process_xlsx_ultraworks(file_bytes, target_lang, progress_bar, status_box)
+                translated_bytes, count, total_found = process_xlsx_turbo(file_bytes, target_lang, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             elif ext == ".pptx":
-                translated_bytes, count = process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box)
+                translated_bytes, count, total_found = process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
-            status_box.success(f"✅ Kész! Összesen {count} db szöveges elem sikeresen lefordítva.")
+            status_box.success(f"✅ Kész! Összesen {count} db szöveges elem sikeresen lefordítva ({total_found} talált mezőből).")
 
             base_name, _ = os.path.splitext(uploaded_file.name)
             output_filename = f"{base_name}_forditott_{target_lang[:2].lower()}{ext}"
