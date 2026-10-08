@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v7.0 UltraSafe</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v7.5 FullText</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -60,25 +60,46 @@ genai.configure(api_key=gemini_key)
 MODEL_NAME = "gemini-3.8-flash"
 model = genai.GenerativeModel(model_name=MODEL_NAME)
 
+def is_translatable(txt):
+    """Minden olyan elemet átengedünk, amiben van legalább egy betű karakter."""
+    if not txt:
+        return False
+    t = txt.strip()
+    if len(t) <= 1 or t.startswith("="):
+        return False
+    # Ha nincs benne egyetlen betű sem (csak szám, pont, vessző, operátorok), kihagyjuk
+    if not re.search(r"[a-zA-Z]", t):
+        return False
+    # Ha csak dátum formátum (pl. 12-Mar-26)
+    if re.match(r"^\d{1,2}-[A-Za-z]{3}-\d{2,4}$", t):
+        return False
+    return True
+
 def translate_batch_fast(texts, target_lang):
-    """Gyors számozott kötegelt fordítás."""
+    """Gyors kötegelt fordítás belső sortörés-védelemmel."""
     if not texts:
         return {}
 
     unique_texts = list(set(texts))
     results = {}
-    batch_size = 25
+    batch_size = 20
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
-        lines_input = "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(chunk)])
+        
+        # Belső sortörések lekezelése egy sorba tömörítve
+        prepared_chunk = [t.replace("\r\n", " [BR] ").replace("\n", " [BR] ") for t in chunk]
+        lines_input = "\n".join([f"[{idx+1}] {t}" for idx, t in enumerate(prepared_chunk)])
+        
         prompt = (
             f"You are a professional industrial, TPM, and technical translator.\n"
             f"Translate each numbered line into {target_lang}.\n"
-            f"Rules:\n"
-            f"- Preserve numbering like [1], [2], etc.\n"
-            f"- Keep technical acronyms (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN) intact.\n"
-            f"- Return ONLY the translated numbered list, exactly {len(chunk)} lines.\n\n"
+            f"CRITICAL RULES:\n"
+            f"1. Preserve line tags exactly like [1], [2], etc.\n"
+            f"2. Keep the placeholder '[BR]' intact where it appears (it represents line breaks).\n"
+            f"3. Keep technical acronyms unchanged (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR).\n"
+            f"4. Translate common business and pillar terms (e.g. 'Pillar owners' -> 'Pillér felelősök/tulajdonosok', 'Plant' -> 'Gyár/Üzem', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség').\n"
+            f"5. Return EXACTLY {len(chunk)} numbered lines in identical sequence. No markdown formatting, no comments.\n\n"
             f"{lines_input}"
         )
 
@@ -96,7 +117,8 @@ def translate_batch_fast(texts, target_lang):
                             idx_val = int(idx_str) - 1
                             trans_content = line[line.find("]")+1:].strip()
                             if 0 <= idx_val < len(chunk):
-                                parsed_translations[idx_val] = trans_content
+                                # Visszaállítjuk a sortöréseket
+                                parsed_translations[idx_val] = trans_content.replace("[BR]", "\n")
 
                 if len(parsed_translations) == len(chunk):
                     for idx_val, orig in enumerate(chunk):
@@ -108,7 +130,7 @@ def translate_batch_fast(texts, target_lang):
                     if len(valid_lines) == len(chunk):
                         for orig, line in zip(chunk, valid_lines):
                             cleaned = line[line.find("]")+1:].strip() if "]" in line else line.strip()
-                            results[orig] = cleaned
+                            results[orig] = cleaned.replace("[BR]", "\n")
                         success = True
                         break
             except Exception:
@@ -122,20 +144,9 @@ def translate_batch_fast(texts, target_lang):
 
     return results
 
-def is_translatable(txt):
-    if not txt:
-        return False
-    t = txt.strip()
-    if len(t) <= 1 or t.startswith("="):
-        return False
-    num_test = t.replace(".", "").replace(",", "").replace("-", "").replace("%", "").replace("/", "").replace(" ", "")
-    if num_test.isdigit():
-        return False
-    return True
-
-# Tiszta Regex csere az XML fájlokban - nem rontja el a névtereket és a munkalap struktúrát!
+# Teljeskörű, biztonságos Excel fordítás
 def process_xlsx_ultrasafe(file_bytes, target_lang, progress_bar, status_box):
-    status_box.info("Excel belső szövegtár kinyerése...")
+    status_box.info("Excel szövegtár kinyerése...")
     progress_bar.progress(15)
 
     in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
@@ -144,7 +155,6 @@ def process_xlsx_ultrasafe(file_bytes, target_lang, progress_bar, status_box):
 
     tag_pattern = re.compile(r"(<(?:\w+:)?t(?:\s+[^>]*)?>)(.*?)(</(?:\w+:)?t>)", re.DOTALL)
 
-    # Minden szöveges tartalmú fájl: sharedStrings, munkalapok (sheet*.xml), és rajzok (drawing*.xml)
     target_files = []
     texts_to_translate = []
 
@@ -159,14 +169,13 @@ def process_xlsx_ultrasafe(file_bytes, target_lang, progress_bar, status_box):
                     if inner_text and is_translatable(inner_text):
                         texts_to_translate.append(inner_text.strip())
 
-    status_box.info(f"Összesen {len(texts_to_translate)} db szöveg megtalálva. Fordítás a Gemini 3.8 Flash modellel...")
-    progress_bar.progress(40)
+    status_box.info(f"Összesen {len(texts_to_translate)} db szöveg megtalálva. Fordítás a Gemini modellel...")
+    progress_bar.progress(35)
 
     t_map = translate_batch_fast(texts_to_translate, target_lang)
     progress_bar.progress(85)
 
     count = 0
-    # Pontos szövegbehelyezés az eredeti bájtszerkezet megőrzésével (nincs XML sérülés)
     for item in in_zip.infolist():
         content_bytes = in_zip.read(item.filename)
 
@@ -183,7 +192,6 @@ def process_xlsx_ultrasafe(file_bytes, target_lang, progress_bar, status_box):
                     count += 1
                     leading_space = text_val[:len(text_val) - len(text_val.lstrip())]
                     trailing_space = text_val[len(text_val.rstrip()):]
-                    # XML entitás védelem
                     trans_text = (t_map[stripped]
                                   .replace("&", "&amp;")
                                   .replace("<", "&lt;")
@@ -249,7 +257,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
             if shape.has_text_frame:
                 for p in shape.text_frame.paragraphs:
                     for run in p.runs:
-                        if is_translatable(run.text):
+                        if run.text.strip():
                             all_runs.append(run)
             if shape.has_table:
                 for row in shape.table.rows:
