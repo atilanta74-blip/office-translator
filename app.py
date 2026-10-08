@@ -1,6 +1,6 @@
 import io
 import os
-import time
+import json
 import zipfile
 import xml.etree.ElementTree as ET
 import streamlit as st
@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v5.0 Flash-3.8</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v5.5 MegaBatch</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -59,52 +59,46 @@ if not gemini_key:
 
 genai.configure(api_key=gemini_key)
 
-# Közvetlenül a Google által megadott modellnév
 MODEL_NAME = "gemini-3.8-flash"
-model = genai.GenerativeModel(model_name=MODEL_NAME)
+model = genai.GenerativeModel(
+    model_name=MODEL_NAME,
+    generation_config={"response_mime_type": "application/json"}
+)
 
-SEP = " ###|||### "
-
-def translate_batch(texts, target_lang):
-    """Kötegelt fordítás a kijelölt Gemini 3.8 Flash modellel."""
+def translate_mega_batch(texts, target_lang):
+    """Minden egyedi szöveg lefordítása mindössze 1-2 kérésből a kvótamegőrzésért."""
     if not texts:
         return {}
 
     unique_texts = list(set(texts))
     results = {}
-    batch_size = 15
+    
+    # Akár 150 szöveg egyszerre egyetlen hívásban!
+    batch_size = 120
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
-        combined = SEP.join(chunk)
-
+        
         prompt = (
-            f"You are a professional industrial and business document translator.\n"
-            f"Translate the following items into {target_lang}.\n"
-            f"Input items are separated by '{SEP}'.\n"
-            f"You MUST return EXACTLY {len(chunk)} translated items in the exact same sequence, separated by '{SEP}'.\n"
-            f"Keep abbreviations intact (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN).\n"
-            f"Return ONLY the translated items separated by '{SEP}'. No introductions, no notes.\n\n"
-            f"{combined}"
+            f"You are a professional industrial, TPM, and technical document translator.\n"
+            f"Translate each string in the input JSON array into {target_lang}.\n"
+            f"Keep abbreviations (e.g. OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN) intact.\n"
+            f"Return a JSON object where keys are the original strings and values are the translated strings.\n\n"
+            f"Input JSON:\n{json.dumps(chunk, ensure_ascii=False)}"
         )
 
         try:
             resp = model.generate_content(prompt)
-            parts = resp.text.strip().split(SEP)
-            if len(parts) == len(chunk):
-                for o, t in zip(chunk, parts):
-                    results[o] = t.strip()
-            else:
-                for o in chunk:
-                    r = model.generate_content(f"Translate accurately to {target_lang}. Return ONLY translated text:\n{o}")
-                    results[o] = r.text.strip()
-                    time.sleep(0.1)
+            data = json.loads(resp.text.strip())
+            if isinstance(data, dict):
+                results.update(data)
+            elif isinstance(data, list) and len(data) == len(chunk):
+                for orig, trans in zip(chunk, data):
+                    results[orig] = trans
         except Exception as e:
-            st.warning(f"API hiba ({MODEL_NAME}): {e}")
+            st.warning(f"Gemini API figyelmeztetés: {e}")
             for o in chunk:
                 results[o] = o
-        
-        time.sleep(0.2)
 
     return results
 
@@ -145,11 +139,11 @@ def process_xlsx_gemini(file_bytes, target_lang, progress_bar, status_box):
             except Exception:
                 pass
 
-    status_box.info(f"Összesen {len(all_elements)} db szöveg megtalálva. Fordítás a Gemini 3.8 Flash modellel...")
-    progress_bar.progress(35)
+    status_box.info(f"Összesen {len(all_elements)} db szöveg összegyűjtve. 1 lépéses Gemini fordítás...")
+    progress_bar.progress(40)
 
     unique_to_translate = [txt for _, _, txt in all_elements]
-    translation_map = translate_batch(unique_to_translate, target_lang)
+    translation_map = translate_mega_batch(unique_to_translate, target_lang)
     progress_bar.progress(85)
 
     count = 0
@@ -189,11 +183,11 @@ def process_docx_gemini(file_bytes, target_lang, progress_bar, status_box):
                         if is_translatable(run.text):
                             all_runs.append(run)
 
-    status_box.info(f"Word szövegek fordítása ({len(all_runs)} elem)...")
-    progress_bar.progress(30)
+    status_box.info(f"Word szövegek összegyűjtve ({len(all_runs)} elem). Fordítás...")
+    progress_bar.progress(40)
 
     texts = [r.text.strip() for r in all_runs]
-    t_map = translate_batch(texts, target_lang)
+    t_map = translate_mega_batch(texts, target_lang)
     progress_bar.progress(85)
 
     count = 0
@@ -218,7 +212,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
             if shape.has_text_frame:
                 for p in shape.text_frame.paragraphs:
                     for run in p.runs:
-                        if run.text.strip():
+                        if is_translatable(run.text):
                             all_runs.append(run)
             if shape.has_table:
                 for row in shape.table.rows:
@@ -228,11 +222,11 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
                                 if run.text.strip():
                                     all_runs.append(run)
 
-    status_box.info(f"PowerPoint diák fordítása ({len(all_runs)} elem)...")
-    progress_bar.progress(30)
+    status_box.info(f"PowerPoint diák összegyűjtve ({len(all_runs)} elem). Fordítás...")
+    progress_bar.progress(40)
 
     texts = [r.text.strip() for r in all_runs]
-    t_map = translate_batch(texts, target_lang)
+    t_map = translate_mega_batch(texts, target_lang)
     progress_bar.progress(85)
 
     count = 0
@@ -247,7 +241,7 @@ def process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count
 
-# Felhasználói felület
+# UI
 uploaded_file = st.file_uploader(
     "1. Húzd ide vagy válaszd ki a fájlt",
     type=["docx", "xlsx", "pptx"],
