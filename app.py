@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v6.0 SafeCore</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v7.0 UltraSafe</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -67,7 +67,7 @@ def translate_batch_fast(texts, target_lang):
 
     unique_texts = list(set(texts))
     results = {}
-    batch_size = 20
+    batch_size = 25
 
     for i in range(0, len(unique_texts), batch_size):
         chunk = unique_texts[i:i + batch_size]
@@ -133,38 +133,40 @@ def is_translatable(txt):
         return False
     return True
 
-# Biztonságos Excel fordítás: kizárólag a valódi szövegtárat (sharedStrings és rajzok) cseréli
-def process_xlsx_safe(file_bytes, target_lang, progress_bar, status_box):
-    status_box.info("Excel szövegtár kinyerése...")
+# Tiszta Regex csere az XML fájlokban - nem rontja el a névtereket és a munkalap struktúrát!
+def process_xlsx_ultrasafe(file_bytes, target_lang, progress_bar, status_box):
+    status_box.info("Excel belső szövegtár kinyerése...")
     progress_bar.progress(15)
 
     in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
     out_zip_buffer = io.BytesIO()
     out_zip = zipfile.ZipFile(out_zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED)
 
-    # 1. Kigyűjtjük az összes szöveget a sharedStrings és rajz XML-ekből
-    texts_to_translate = []
-    # Kifejezés a <t> vagy <a:t> címkék tartalmának kinyerésére a struktúra érintetlenül hagyásával
     tag_pattern = re.compile(r"(<(?:\w+:)?t(?:\s+[^>]*)?>)(.*?)(</(?:\w+:)?t>)", re.DOTALL)
 
+    # Minden szöveges tartalmú fájl: sharedStrings, munkalapok (sheet*.xml), és rajzok (drawing*.xml)
     target_files = []
-    for item in in_zip.infolist():
-        if item.filename == "xl/sharedStrings.xml" or item.filename.startswith("xl/drawings/drawing"):
-            target_files.append(item.filename)
-            content_str = in_zip.read(item.filename).decode('utf-8', errors='ignore')
-            for match in tag_pattern.finditer(content_str):
-                inner_text = match.group(2)
-                if inner_text and is_translatable(inner_text):
-                    texts_to_translate.append(inner_text.strip())
+    texts_to_translate = []
 
-    status_box.info(f"Összesen {len(texts_to_translate)} db szöveg megtalálva. Gemini fordítás...")
+    for item in in_zip.infolist():
+        fn = item.filename
+        if fn == "xl/sharedStrings.xml" or fn.startswith("xl/worksheets/sheet") or fn.startswith("xl/drawings/drawing"):
+            if fn.endswith(".xml"):
+                target_files.append(fn)
+                content_str = in_zip.read(fn).decode('utf-8', errors='ignore')
+                for match in tag_pattern.finditer(content_str):
+                    inner_text = match.group(2)
+                    if inner_text and is_translatable(inner_text):
+                        texts_to_translate.append(inner_text.strip())
+
+    status_box.info(f"Összesen {len(texts_to_translate)} db szöveg megtalálva. Fordítás a Gemini 3.8 Flash modellel...")
     progress_bar.progress(40)
 
     t_map = translate_batch_fast(texts_to_translate, target_lang)
     progress_bar.progress(85)
 
     count = 0
-    # 2. Visszaírás a zipbe pontosan az eredeti formátum megtartásával
+    # Pontos szövegbehelyezés az eredeti bájtszerkezet megőrzésével (nincs XML sérülés)
     for item in in_zip.infolist():
         content_bytes = in_zip.read(item.filename)
 
@@ -179,10 +181,14 @@ def process_xlsx_safe(file_bytes, target_lang, progress_bar, status_box):
                 stripped = text_val.strip()
                 if stripped in t_map and t_map[stripped] != stripped:
                     count += 1
-                    # Megtartjuk a vezető vagy záró szóközöket ha voltak
                     leading_space = text_val[:len(text_val) - len(text_val.lstrip())]
                     trailing_space = text_val[len(text_val.rstrip()):]
-                    return f"{prefix}{leading_space}{t_map[stripped]}{trailing_space}{suffix}"
+                    # XML entitás védelem
+                    trans_text = (t_map[stripped]
+                                  .replace("&", "&amp;")
+                                  .replace("<", "&lt;")
+                                  .replace(">", "&gt;"))
+                    return f"{prefix}{leading_space}{trans_text}{trailing_space}{suffix}"
                 return match.group(0)
 
             new_str = tag_pattern.sub(replace_text, content_str)
@@ -306,7 +312,7 @@ if translate_button:
                 translated_bytes, count = process_docx_gemini(file_bytes, target_lang, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             elif ext == ".xlsx":
-                translated_bytes, count = process_xlsx_safe(file_bytes, target_lang, progress_bar, status_box)
+                translated_bytes, count = process_xlsx_ultrasafe(file_bytes, target_lang, progress_bar, status_box)
                 mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             elif ext == ".pptx":
                 translated_bytes, count = process_pptx_gemini(file_bytes, target_lang, progress_bar, status_box)
