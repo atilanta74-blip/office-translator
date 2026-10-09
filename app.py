@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v24.0 FlashOnly</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v25.0 AutoSelect</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító (Word, Excel, PowerPoint)</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -59,14 +59,6 @@ if not gemini_key:
 gemini_key = gemini_key.strip()
 client = genai.Client(api_key=gemini_key)
 
-# Kizárólag valódi szöveges modellek (nem hang/tts vagy beágyazó modellek)
-TARGET_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash"
-]
-
 def has_letters(text):
     if not text:
         return False
@@ -74,6 +66,25 @@ def has_letters(text):
     if len(t) <= 1 or t.startswith("="):
         return False
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
+
+def get_usable_models():
+    """Közvetlenül lekérdezi a Google-től azokat a modelleket, amelyek szöveget tudnak generálni és nem audió/tts modellek."""
+    usable = []
+    try:
+        for m in client.models.list():
+            name = m.name.replace("models/", "")
+            # Kizárjuk a hang, tts, embedding és vision-only modelleket
+            if any(bad in name.lower() for bad in ["tts", "embedding", "audio", "imagen"]):
+                continue
+            if "gemini" in name.lower():
+                usable.append(name)
+    except Exception:
+        pass
+    
+    # Ha nem sikerült lekérni, az érvényes alapértelmezett lista
+    if not usable:
+        usable = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3-flash-preview"]
+    return usable
 
 def translate_batch(unique_texts, target_lang, status_box):
     if not unique_texts:
@@ -91,10 +102,11 @@ def translate_batch(unique_texts, target_lang, status_box):
     )
 
     results = {}
+    models_to_try = get_usable_models()
     last_error = ""
 
-    for model_name in TARGET_MODELS:
-        status_box.info(f"AI fordítás a következő modellel: {model_name}...")
+    for model_name in models_to_try:
+        status_box.info(f"AI fordítás próbálkozás ({model_name})...")
         try:
             response = client.models.generate_content(
                 model=model_name,
@@ -117,7 +129,9 @@ def translate_batch(unique_texts, target_lang, status_box):
             st.success(f"✅ Sikeres fordítás a(z) **{model_name}** modellel!")
             return results
         except Exception as e:
-            last_error = f"{model_name}: {str(e)}"
+            err_msg = str(e)
+            last_error = f"{model_name}: {err_msg}"
+            # Ha kvóta vagy 404 hiba van ennél a modellnél, lépünk a következőre a listában
             continue
 
     st.error(f"❌ Részletes Google API hiba: {last_error}")
