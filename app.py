@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v23.0 AutoModel</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v24.0 FlashOnly</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító (Word, Excel, PowerPoint)</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -59,6 +59,14 @@ if not gemini_key:
 gemini_key = gemini_key.strip()
 client = genai.Client(api_key=gemini_key)
 
+# Kizárólag valódi szöveges modellek (nem hang/tts vagy beágyazó modellek)
+TARGET_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash"
+]
+
 def has_letters(text):
     if not text:
         return False
@@ -66,31 +74,6 @@ def has_letters(text):
     if len(t) <= 1 or t.startswith("="):
         return False
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
-
-def get_best_available_models():
-    """Automatikusan felderíti az aktuálisan támogatott modelleket az API-ból."""
-    preferred = [
-        "gemini-3.1-pro-preview",
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-pro"
-    ]
-    try:
-        remote_models = [m.name for m in client.models.list()]
-        valid_models = []
-        # Először a preferáltakat nézzük, ha léteznek távolról
-        for pref in preferred:
-            for rm in remote_models:
-                if pref in rm:
-                    if rm not in valid_models:
-                        valid_models.append(rm)
-        # Ha egyik preferált sincs, minden 'generateContent'-et tudó modellt felveszünk
-        if not valid_models:
-            valid_models = [rm for rm in remote_models if "gemini" in rm]
-        return valid_models if valid_models else preferred
-    except Exception:
-        return ["gemini-3.1-pro-preview", "gemini-2.5-flash", "gemini-2.0-flash"]
 
 def translate_batch(unique_texts, target_lang, status_box):
     if not unique_texts:
@@ -103,20 +86,18 @@ def translate_batch(unique_texts, target_lang, status_box):
         f"Strict Rules:\n"
         f"1. Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
         f"2. Translate common manufacturing/TPM terms accurately (e.g. 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség').\n"
-        f"3. Return ONLY a valid JSON object matching the exact keys ('1', '2', etc.) and translated string values. Do not wrap in markdown or backticks.\n\n"
+        f"3. Return ONLY a valid JSON object matching the exact keys ('1', '2', etc.) and translated string values. Do not wrap in markdown.\n\n"
         f"{json.dumps(input_data, ensure_ascii=False)}"
     )
 
-    candidate_models = get_best_available_models()
     results = {}
     last_error = ""
 
-    for model_name in candidate_models:
-        clean_name = model_name.replace("models/", "")
-        status_box.info(f"AI fordítás ({clean_name})...")
+    for model_name in TARGET_MODELS:
+        status_box.info(f"AI fordítás a következő modellel: {model_name}...")
         try:
             response = client.models.generate_content(
-                model=clean_name,
+                model=model_name,
                 contents=prompt
             )
             raw_text = response.text.strip()
@@ -133,10 +114,10 @@ def translate_batch(unique_texts, target_lang, status_box):
                 if k in parsed_json and parsed_json[k]:
                     results[orig] = str(parsed_json[k]).strip()
 
-            st.success(f"✅ Sikeres fordítás a(z) **{clean_name}** modellel!")
+            st.success(f"✅ Sikeres fordítás a(z) **{model_name}** modellel!")
             return results
         except Exception as e:
-            last_error = str(e)
+            last_error = f"{model_name}: {str(e)}"
             continue
 
     st.error(f"❌ Részletes Google API hiba: {last_error}")
@@ -145,7 +126,6 @@ def translate_batch(unique_texts, target_lang, status_box):
 
     return results
 
-# 1. Excel (.xlsx) feldolgozás
 def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
     status_box.info("Excel XML réteg beolvasása...")
     progress_bar.progress(15)
@@ -215,7 +195,6 @@ def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
 
     return out_zip_buffer.getvalue(), replaced_count, len(raw_texts)
 
-# 2. Word (.docx) feldolgozás
 def process_docx(file_bytes, target_lang, progress_bar, status_box):
     doc = Document(io.BytesIO(file_bytes))
     paragraphs_to_translate = []
@@ -250,7 +229,6 @@ def process_docx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count, len(paragraphs_to_translate)
 
-# 3. PowerPoint (.pptx) feldolgozás
 def process_pptx(file_bytes, target_lang, progress_bar, status_box):
     prs = Presentation(io.BytesIO(file_bytes))
     shapes_to_translate = []
