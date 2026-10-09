@@ -5,7 +5,7 @@ import json
 import time
 import zipfile
 import streamlit as st
-import google.generativeai as genai
+from google import genai
 from docx import Document
 from pptx import Presentation
 
@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v20.0 CleanMaster</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v21.0 GenAI-SDK</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító (Word, Excel, PowerPoint)</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -56,15 +56,8 @@ if not gemini_key:
     st.error("⚠️ Hiányzik a GEMINI_API_KEY a Secrets beállításokból!")
     st.stop()
 
-genai.configure(api_key=gemini_key)
-
-# Elérhető modellek
-MODELS_TO_TRY = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-2.5-pro"
-]
+gemini_key = gemini_key.strip()
+client = genai.Client(api_key=gemini_key)
 
 def has_letters(text):
     if not text:
@@ -75,7 +68,6 @@ def has_letters(text):
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
 def translate_batch(unique_texts, target_lang, status_box):
-    """Kötegelt fordítás egyetlen kéréssel a minimális kvótafogyasztásért."""
     if not unique_texts:
         return {}
 
@@ -91,14 +83,17 @@ def translate_batch(unique_texts, target_lang, status_box):
     )
 
     results = {}
-    success = False
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    last_error = ""
 
-    for model_name in MODELS_TO_TRY:
-        status_box.info(f"AI fordítás a következő modellel: {model_name}...")
+    for model_name in models_to_try:
+        status_box.info(f"AI fordítás ({model_name})...")
         try:
-            m = genai.GenerativeModel(model_name=model_name)
-            resp = m.generate_content(prompt, request_options={"timeout": 90})
-            raw_text = resp.text.strip()
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            raw_text = response.text.strip()
             if raw_text.startswith("```json"):
                 raw_text = raw_text[7:]
             if raw_text.startswith("```"):
@@ -112,22 +107,15 @@ def translate_batch(unique_texts, target_lang, status_box):
                 if k in parsed_json and parsed_json[k]:
                     results[orig] = str(parsed_json[k]).strip()
 
-            success = True
             st.success(f"✅ Sikeres fordítás a(z) **{model_name}** modellel!")
-            break
+            return results
         except Exception as e:
-            err = str(e)
-            if "429" in err or "quota" in err.lower():
-                continue
-            elif "404" in err:
-                continue
-            else:
-                continue
+            last_error = str(e)
+            continue
 
-    if not success:
-        st.error("A Gemini API hívás sikertelen volt. Ellenőrizd a Secrets kulcsot és a projekt kvótáját!")
-        for orig in unique_texts:
-            results[orig] = orig
+    st.error(f"❌ Részletes Google API hiba: {last_error}")
+    for orig in unique_texts:
+        results[orig] = orig
 
     return results
 
@@ -273,7 +261,6 @@ def process_pptx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count, len(shapes_to_translate)
 
-# Felhasználói felület
 uploaded_file = st.file_uploader(
     "1. Húzd ide vagy válaszd ki a fájlt",
     type=["docx", "xlsx", "pptx"],
