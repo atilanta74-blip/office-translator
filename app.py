@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v19.0 FullDoc</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v20.0 CleanMaster</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító (Word, Excel, PowerPoint)</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -58,8 +58,8 @@ if not gemini_key:
 
 genai.configure(api_key=gemini_key)
 
-# Stabil, modern modellek prioritási sora
-CANDIDATE_MODELS = [
+# Elérhető modellek
+MODELS_TO_TRY = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
@@ -74,30 +74,30 @@ def has_letters(text):
         return False
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
-def translate_batch_gemini(unique_texts, target_lang, status_box):
-    """Kötegelt fordítás egyetlen hívással a kvótatakarékosságért."""
+def translate_batch(unique_texts, target_lang, status_box):
+    """Kötegelt fordítás egyetlen kéréssel a minimális kvótafogyasztásért."""
     if not unique_texts:
         return {}
 
     input_data = {str(idx + 1): txt for idx, txt in enumerate(unique_texts)}
     prompt = (
         f"You are a professional industrial, technical, TPM, and business translator.\n"
-        f"Translate the values of the JSON object into {target_lang}.\n"
-        f"Rules:\n"
+        f"Translate the values of the following JSON object into {target_lang}.\n"
+        f"Strict Rules:\n"
         f"1. Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
-        f"2. Translate common industrial terms: 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség'.\n"
-        f"3. Return ONLY a valid JSON object with the exact same keys ('1', '2', etc.) and the translated values. Do not wrap in markdown or backticks.\n\n"
+        f"2. Translate common manufacturing/TPM terms accurately (e.g. 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség').\n"
+        f"3. Return ONLY a valid JSON object matching the exact keys ('1', '2', etc.) and translated string values. Do not wrap in markdown.\n\n"
         f"{json.dumps(input_data, ensure_ascii=False)}"
     )
 
     results = {}
     success = False
 
-    for model_name in CANDIDATE_MODELS:
+    for model_name in MODELS_TO_TRY:
         status_box.info(f"AI fordítás a következő modellel: {model_name}...")
         try:
             m = genai.GenerativeModel(model_name=model_name)
-            resp = m.generate_content(prompt, request_options={"timeout": 75})
+            resp = m.generate_content(prompt, request_options={"timeout": 90})
             raw_text = resp.text.strip()
             if raw_text.startswith("```json"):
                 raw_text = raw_text[7:]
@@ -113,11 +113,11 @@ def translate_batch_gemini(unique_texts, target_lang, status_box):
                     results[orig] = str(parsed_json[k]).strip()
 
             success = True
-            st.success(f"✅ Sikeres Gemini fordítás ({model_name})!")
+            st.success(f"✅ Sikeres fordítás a(z) **{model_name}** modellel!")
             break
         except Exception as e:
             err = str(e)
-            if "429" in err:
+            if "429" in err or "quota" in err.lower():
                 continue
             elif "404" in err:
                 continue
@@ -125,15 +125,15 @@ def translate_batch_gemini(unique_texts, target_lang, status_box):
                 continue
 
     if not success:
-        st.error("A Gemini API nem válaszolt. Ellenőrizd a beállított API kulcsot a Secrets menüben!")
+        st.error("A Gemini API hívás sikertelen volt. Ellenőrizd a Secrets kulcsot és a projekt kvótáját!")
         for orig in unique_texts:
             results[orig] = orig
 
     return results
 
-# Excel feldolgozás
+# 1. Excel (.xlsx) feldolgozás
 def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
-    status_box.info("Excel belső szövegtár kinyerése...")
+    status_box.info("Excel XML réteg beolvasása...")
     progress_bar.progress(15)
 
     in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
@@ -157,10 +157,10 @@ def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
                         raw_texts.append(val.strip())
 
     unique_texts = list(set(raw_texts))
-    status_box.info(f"{len(raw_texts)} db mező ({len(unique_texts)} egyedi szöveg) átadása a Gemini-nek...")
+    status_box.info(f"{len(raw_texts)} db mező ({len(unique_texts)} egyedi szöveg) átadása a fordítónak...")
     progress_bar.progress(35)
 
-    t_map = translate_batch_gemini(unique_texts, target_lang, status_box)
+    t_map = translate_batch(unique_texts, target_lang, status_box)
     progress_bar.progress(85)
 
     replaced_count = 0
@@ -201,7 +201,7 @@ def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
 
     return out_zip_buffer.getvalue(), replaced_count, len(raw_texts)
 
-# Word (.docx) feldolgozás
+# 2. Word (.docx) feldolgozás
 def process_docx(file_bytes, target_lang, progress_bar, status_box):
     doc = Document(io.BytesIO(file_bytes))
     paragraphs_to_translate = []
@@ -221,7 +221,7 @@ def process_docx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(30)
 
     unique_texts = list(set([p.text.strip() for p in paragraphs_to_translate]))
-    t_map = translate_batch_gemini(unique_texts, target_lang, status_box)
+    t_map = translate_batch(unique_texts, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
@@ -236,7 +236,7 @@ def process_docx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count, len(paragraphs_to_translate)
 
-# PowerPoint (.pptx) feldolgozás
+# 3. PowerPoint (.pptx) feldolgozás
 def process_pptx(file_bytes, target_lang, progress_bar, status_box):
     prs = Presentation(io.BytesIO(file_bytes))
     shapes_to_translate = []
@@ -258,7 +258,7 @@ def process_pptx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(30)
 
     unique_texts = list(set([p.text.strip() for p in shapes_to_translate]))
-    t_map = translate_batch_gemini(unique_texts, target_lang, status_box)
+    t_map = translate_batch(unique_texts, target_lang, status_box)
     progress_bar.progress(85)
 
     count = 0
