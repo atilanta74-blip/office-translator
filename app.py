@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v21.0 GenAI-SDK</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v22.0 StableGenAI</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító (Word, Excel, PowerPoint)</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -59,6 +59,13 @@ if not gemini_key:
 gemini_key = gemini_key.strip()
 client = genai.Client(api_key=gemini_key)
 
+# A hivatalosan támogatott Gemini modellek prioritása az új SDK-ban
+MODELS_TO_TRY = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.5-pro"
+]
+
 def has_letters(text):
     if not text:
         return False
@@ -83,10 +90,9 @@ def translate_batch(unique_texts, target_lang, status_box):
     )
 
     results = {}
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     last_error = ""
 
-    for model_name in models_to_try:
+    for model_name in MODELS_TO_TRY:
         status_box.info(f"AI fordítás ({model_name})...")
         try:
             response = client.models.generate_content(
