@@ -32,7 +32,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v22.0 StableGenAI</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v23.0 AutoModel</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító (Word, Excel, PowerPoint)</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
@@ -59,13 +59,6 @@ if not gemini_key:
 gemini_key = gemini_key.strip()
 client = genai.Client(api_key=gemini_key)
 
-# A hivatalosan támogatott Gemini modellek prioritása az új SDK-ban
-MODELS_TO_TRY = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.5-pro"
-]
-
 def has_letters(text):
     if not text:
         return False
@@ -73,6 +66,31 @@ def has_letters(text):
     if len(t) <= 1 or t.startswith("="):
         return False
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
+
+def get_best_available_models():
+    """Automatikusan felderíti az aktuálisan támogatott modelleket az API-ból."""
+    preferred = [
+        "gemini-3.1-pro-preview",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-pro"
+    ]
+    try:
+        remote_models = [m.name for m in client.models.list()]
+        valid_models = []
+        # Először a preferáltakat nézzük, ha léteznek távolról
+        for pref in preferred:
+            for rm in remote_models:
+                if pref in rm:
+                    if rm not in valid_models:
+                        valid_models.append(rm)
+        # Ha egyik preferált sincs, minden 'generateContent'-et tudó modellt felveszünk
+        if not valid_models:
+            valid_models = [rm for rm in remote_models if "gemini" in rm]
+        return valid_models if valid_models else preferred
+    except Exception:
+        return ["gemini-3.1-pro-preview", "gemini-2.5-flash", "gemini-2.0-flash"]
 
 def translate_batch(unique_texts, target_lang, status_box):
     if not unique_texts:
@@ -85,18 +103,20 @@ def translate_batch(unique_texts, target_lang, status_box):
         f"Strict Rules:\n"
         f"1. Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
         f"2. Translate common manufacturing/TPM terms accurately (e.g. 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség').\n"
-        f"3. Return ONLY a valid JSON object matching the exact keys ('1', '2', etc.) and translated string values. Do not wrap in markdown.\n\n"
+        f"3. Return ONLY a valid JSON object matching the exact keys ('1', '2', etc.) and translated string values. Do not wrap in markdown or backticks.\n\n"
         f"{json.dumps(input_data, ensure_ascii=False)}"
     )
 
+    candidate_models = get_best_available_models()
     results = {}
     last_error = ""
 
-    for model_name in MODELS_TO_TRY:
-        status_box.info(f"AI fordítás ({model_name})...")
+    for model_name in candidate_models:
+        clean_name = model_name.replace("models/", "")
+        status_box.info(f"AI fordítás ({clean_name})...")
         try:
             response = client.models.generate_content(
-                model=model_name,
+                model=clean_name,
                 contents=prompt
             )
             raw_text = response.text.strip()
@@ -113,7 +133,7 @@ def translate_batch(unique_texts, target_lang, status_box):
                 if k in parsed_json and parsed_json[k]:
                     results[orig] = str(parsed_json[k]).strip()
 
-            st.success(f"✅ Sikeres fordítás a(z) **{model_name}** modellel!")
+            st.success(f"✅ Sikeres fordítás a(z) **{clean_name}** modellel!")
             return results
         except Exception as e:
             last_error = str(e)
