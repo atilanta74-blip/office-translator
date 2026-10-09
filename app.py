@@ -8,6 +8,8 @@ import urllib.request
 import zipfile
 import streamlit as st
 import google.generativeai as genai
+from docx import Document
+from pptx import Presentation
 
 # Oldal konfiguráció
 st.set_page_config(
@@ -33,8 +35,8 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v17.0 MyMemory</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🌐 Office Document Translator Pro <span style="font-size: 1rem; color: #10b981;">v18.0 Universal</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Intelligens, formázásmegőrző Office fájlfordító (Word, Excel, PowerPoint)</div>', unsafe_allow_html=True)
 
 LANGUAGES = {
     "Magyar (Hungarian)": {"gemini": "Hungarian", "code": "hu"},
@@ -62,7 +64,6 @@ def has_letters(text):
         return False
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
-# 1. MyMemory ingyenes API (nem tiltja le a Streamlit IP-címét!)
 def mymemory_translate(text, target_code="hu"):
     if not text or not has_letters(text):
         return text
@@ -80,14 +81,13 @@ def mymemory_translate(text, target_code="hu"):
         pass
     return text
 
-# 2. Hibrid fordítás
 def translate_texts_all(unique_texts, lang_info, status_box, progress_bar):
     target_gemini = lang_info["gemini"]
     target_code = lang_info["code"]
     results = {}
     use_fallback = False
 
-    # Próbáljuk először a Gemini-t 1 db egybefüggő kéréssel
+    # 1. Próbálkozás a Geminivel (1 db összefogott hívással)
     if gemini_key:
         status_box.info("Fordítás kísérlet a Gemini AI modellel...")
         try:
@@ -100,7 +100,7 @@ def translate_texts_all(unique_texts, lang_info, status_box, progress_bar):
                 f"Translate the values of the JSON object into {target_gemini}.\n"
                 f"Rules:\n"
                 f"1. Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
-                f"2. Translate common terms: 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség'.\n"
+                f"2. Translate standard terms accurately.\n"
                 f"3. Return ONLY a valid JSON object matching the input keys. No markdown backticks.\n\n"
                 f"{json.dumps(input_data, ensure_ascii=False)}"
             )
@@ -124,11 +124,11 @@ def translate_texts_all(unique_texts, lang_info, status_box, progress_bar):
             return results
         except Exception as e:
             err_str = str(e)
-            st.warning(f"⚠️ Gemini nem elérhető ({err_str[:60]}...). Automatikus átváltás az ingyenes MyMemory motorra!")
+            st.warning(f"⚠️ Gemini nem elérhető ({err_str[:60]}...). Automatikus átváltás a tartalék motorra!")
             use_fallback = True
 
-    # Fallback: MyMemory motor
-    status_box.info(f"Szövegek fordítása a stabil tartalék motorral ({len(unique_texts)} elem)...")
+    # 2. Tartalék MyMemory motor
+    status_box.info(f"Szövegek fordítása a tartalék motorral ({len(unique_texts)} elem)...")
     total = len(unique_texts)
     for idx, txt in enumerate(unique_texts):
         res = mymemory_translate(txt, target_code=target_code)
@@ -137,10 +137,11 @@ def translate_texts_all(unique_texts, lang_info, status_box, progress_bar):
             perc = int(35 + ((idx + 1) / total) * 50)
             progress_bar.progress(perc)
             status_box.info(f"Tartalék motor fordítás: {idx + 1}/{total} kész...")
-        time.sleep(0.15) # Biztonsági szünet
+        time.sleep(0.15)
 
     return results
 
+# Excel feldolgozás
 def process_xlsx(file_bytes, lang_info, progress_bar, status_box):
     status_box.info("Excel belső szövegtár kinyerése...")
     progress_bar.progress(15)
@@ -210,11 +211,87 @@ def process_xlsx(file_bytes, lang_info, progress_bar, status_box):
 
     return out_zip_buffer.getvalue(), replaced_count, len(raw_texts)
 
-# UI
+# Word (.docx) feldolgozás
+def process_docx(file_bytes, lang_info, progress_bar, status_box):
+    doc = Document(io.BytesIO(file_bytes))
+    all_runs = []
+
+    for p in doc.paragraphs:
+        for run in p.runs:
+            if has_letters(run.text):
+                all_runs.append(run)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for run in p.runs:
+                        if has_letters(run.text):
+                            all_runs.append(run)
+
+    status_box.info(f"Word szövegek átvizsgálása ({len(all_runs)} elem)...")
+    progress_bar.progress(30)
+
+    unique_texts = list(set([r.text.strip() for r in all_runs]))
+    t_map = translate_texts_all(unique_texts, lang_info, status_box, progress_bar)
+    progress_bar.progress(85)
+
+    count = 0
+    for r in all_runs:
+        clean_t = r.text.strip()
+        if clean_t in t_map and t_map[clean_t] != clean_t:
+            r.text = t_map[clean_t]
+            count += 1
+
+    out_stream = io.BytesIO()
+    doc.save(out_stream)
+    progress_bar.progress(100)
+    return out_stream.getvalue(), count, len(all_runs)
+
+# PowerPoint (.pptx) feldolgozás
+def process_pptx(file_bytes, lang_info, progress_bar, status_box):
+    prs = Presentation(io.BytesIO(file_bytes))
+    all_runs = []
+
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for p in shape.text_frame.paragraphs:
+                    for run in p.runs:
+                        if has_letters(run.text):
+                            all_runs.append(run)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        for p in cell.text_frame.paragraphs:
+                            for run in p.runs:
+                                if has_letters(run.text):
+                                    all_runs.append(run)
+
+    status_box.info(f"PowerPoint diák átvizsgálása ({len(all_runs)} elem)...")
+    progress_bar.progress(30)
+
+    unique_texts = list(set([r.text.strip() for r in all_runs]))
+    t_map = translate_texts_all(unique_texts, lang_info, status_box, progress_bar)
+    progress_bar.progress(85)
+
+    count = 0
+    for r in all_runs:
+        clean_t = r.text.strip()
+        if clean_t in t_map and t_map[clean_t] != clean_t:
+            r.text = t_map[clean_t]
+            count += 1
+
+    out_stream = io.BytesIO()
+    prs.save(out_stream)
+    progress_bar.progress(100)
+    return out_stream.getvalue(), count, len(all_runs)
+
+# Felhasználói felület
 uploaded_file = st.file_uploader(
     "1. Húzd ide vagy válaszd ki a fájlt",
-    type=["xlsx"],
-    help="Excel (.xlsx) fájlokat tölthetsz fel."
+    type=["docx", "xlsx", "pptx"],
+    help="Word (.docx), Excel (.xlsx) és PowerPoint (.pptx) fájlokat tölthetsz fel."
 )
 
 col1, col2 = st.columns([2, 1])
@@ -237,8 +314,19 @@ if translate_button:
         progress_bar = st.progress(5)
 
         try:
-            translated_bytes, count, total_found = process_xlsx(file_bytes, lang_info, progress_bar, status_box)
-            mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            translated_bytes = None
+            count = 0
+            total_found = 0
+
+            if ext == ".xlsx":
+                translated_bytes, count, total_found = process_xlsx(file_bytes, lang_info, progress_bar, status_box)
+                mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            elif ext == ".docx":
+                translated_bytes, count, total_found = process_docx(file_bytes, lang_info, progress_bar, status_box)
+                mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif ext == ".pptx":
+                translated_bytes, count, total_found = process_pptx(file_bytes, lang_info, progress_bar, status_box)
+                mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
             status_box.success(f"✅ Kész! Összesen {count} db szöveges elem sikeresen lefordítva ({total_found} talált mezőből).")
 
