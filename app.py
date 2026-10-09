@@ -27,13 +27,11 @@ html, body, [class*="css"] {
     color: #f1f5f9;
 }
 
-/* Fő háttér gradiens */
 .stApp {
     background: radial-gradient(circle at 50% 0%, #172554 0%, #0b0f19 55%, #030712 100%);
     background-attachment: fixed;
 }
 
-/* Fejléc stílus */
 .hero-container {
     text-align: center;
     padding: 2.5rem 1rem 1.5rem 1rem;
@@ -75,19 +73,6 @@ html, body, [class*="css"] {
     line-height: 1.6;
 }
 
-/* Glassmorphism Vezérlő Panel */
-.glass-panel {
-    background: rgba(15, 23, 42, 0.65);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 20px;
-    padding: 2rem;
-    box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.05);
-    margin-bottom: 2rem;
-}
-
-/* Fájl típus jelvények */
 .format-grid {
     display: flex;
     justify-content: center;
@@ -116,7 +101,6 @@ html, body, [class*="css"] {
     box-shadow: 0 0 10px #10b981;
 }
 
-/* Streamlit gomb futurisztikus felülbírálása */
 div.stButton > button {
     width: 100%;
     background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 50%, #0284c7 100%) !important;
@@ -136,7 +120,6 @@ div.stButton > button:hover {
     border-color: rgba(255, 255, 255, 0.4) !important;
 }
 
-/* Letöltés gomb */
 div.stDownloadButton > button {
     background: linear-gradient(135deg, #059669 0%, #047857 100%) !important;
     color: #ffffff !important;
@@ -145,7 +128,6 @@ div.stDownloadButton > button {
     box-shadow: 0 0 25px rgba(16, 185, 129, 0.4) !important;
 }
 
-/* Footer sáv */
 .footer-hud {
     margin-top: 4rem;
     padding-top: 1.5rem;
@@ -169,14 +151,13 @@ div.stDownloadButton > button {
 </style>
 """, unsafe_allow_html=True)
 
-# Hero szekció
 st.markdown("""
 <div class="hero-container">
     <div class="hero-badge">
-        <span class="dot-green"></span> Core Engine v26.0 Active
+        <span class="dot-green"></span> Core Engine v27.0 BatchFlow Active
     </div>
     <div class="hero-title">TranslateOS Neural Pro</div>
-    <div class="hero-subtitle">Vállalati szintű intelligens Office fordítórendszer. XML-alapú formázásmegőrzés gépi tanulási kontextuskezeléssel.</div>
+    <div class="hero-subtitle">Nagyvállalati szintű intelligens Office fordítórendszer. XML-alapú formázásmegőrzés, nagy adatbázisok kötegelt fordítása.</div>
     <div class="format-grid">
         <div class="format-card">📑 Microsoft Word (.docx)</div>
         <div class="format-card">📊 Microsoft Excel (.xlsx)</div>
@@ -217,75 +198,85 @@ def has_letters(text):
         return False
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
-def get_usable_models():
-    usable = []
+def get_active_model_name():
+    """Kiválasztja az első működő szöveges Flash modellt."""
+    candidates = ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash"]
     try:
-        for m in client.models.list():
-            name = m.name.replace("models/", "")
-            if any(bad in name.lower() for bad in ["tts", "embedding", "audio", "imagen"]):
-                continue
-            if "gemini" in name.lower():
-                usable.append(name)
+        remote_models = [m.name.replace("models/", "") for m in client.models.list()]
+        for c in candidates:
+            if c in remote_models:
+                return c
+        for rm in remote_models:
+            if "gemini" in rm and not any(bad in rm for bad in ["tts", "embedding", "audio"]):
+                return rm
     except Exception:
         pass
-    if not usable:
-        usable = ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash"]
-    return usable
+    return "gemini-flash-lite-latest"
 
-def translate_batch(unique_texts, target_lang, status_box):
+def translate_chunks(unique_texts, target_lang, progress_bar, status_box):
+    """Biztonságos, 60-as blokkokban történő fordítás a token-túllépés és leállás ellen."""
     if not unique_texts:
         return {}
 
-    input_data = {str(idx + 1): txt for idx, txt in enumerate(unique_texts)}
-    prompt = (
-        f"You are a professional industrial, technical, TPM, and business translator.\n"
-        f"Translate the values of the following JSON object into {target_lang}.\n"
-        f"Strict Rules:\n"
-        f"1. Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, etc.).\n"
-        f"2. Translate common manufacturing/TPM terms accurately (e.g. 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség').\n"
-        f"3. Return ONLY a valid JSON object matching the exact keys ('1', '2', etc.) and translated string values. Do not wrap in markdown.\n\n"
-        f"{json.dumps(input_data, ensure_ascii=False)}"
-    )
-
+    model_name = get_active_model_name()
     results = {}
-    models_to_try = get_usable_models()
-    last_error = ""
+    chunk_size = 60
+    chunks = [unique_texts[i:i + chunk_size] for i in range(0, len(unique_texts), chunk_size)]
+    total_chunks = len(chunks)
 
-    for model_name in models_to_try:
-        status_box.info(f"⚡ Neural Pipeline inicializálása: **{model_name}**...")
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            raw_text = response.text.strip()
-            if raw_text.startswith("```json"):
-                raw_text = raw_text[7:]
-            if raw_text.startswith("```"):
-                raw_text = raw_text[3:]
-            if raw_text.endswith("```"):
-                raw_text = raw_text[:-3]
+    status_box.info(f"⚡ Neural Engine aktív: **{model_name}** | Összesen {len(unique_texts)} egyedi szöveg {total_chunks} csomagban...")
 
-            parsed_json = json.loads(raw_text.strip())
-            for idx, orig in enumerate(unique_texts):
-                k = str(idx + 1)
-                if k in parsed_json and parsed_json[k]:
-                    results[orig] = str(parsed_json[k]).strip()
+    for c_idx, chunk in enumerate(chunks):
+        input_data = {str(idx + 1): txt for idx, txt in enumerate(chunk)}
+        prompt = (
+            f"You are a professional industrial, technical, TPM, and business translator.\n"
+            f"Translate the values of the following JSON object into {target_lang}.\n"
+            f"Strict Rules:\n"
+            f"1. Keep technical acronyms intact (OEE, KPI, TIR, IPS, UPS, PDCA, DDS, WPA, BS, TBR, PSR, FI, CBN, TEAT, SWP, LDR, SOC, HTR, CIL, DMS, BDE, etc.).\n"
+            f"2. Translate common manufacturing/TPM terms accurately (e.g. 'Pillar owners' -> 'Pillér felelősök', 'Plant' -> 'Üzem/Gyár', 'Schedule' -> 'Ütemterv', 'Loss' -> 'Veszteség').\n"
+            f"3. Return ONLY a valid JSON object matching the exact keys ('1', '2', etc.) and translated string values. Do not wrap in markdown.\n\n"
+            f"{json.dumps(input_data, ensure_ascii=False)}"
+        )
 
-            st.success(f"🚀 Feldolgozás kész: **{model_name}** motorral!")
-            return results
-        except Exception as e:
-            last_error = f"{model_name}: {str(e)}"
-            continue
+        success = False
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                raw_text = response.text.strip()
+                if raw_text.startswith("```json"):
+                    raw_text = raw_text[7:]
+                if raw_text.startswith("```"):
+                    raw_text = raw_text[3:]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text[:-3]
 
-    st.error(f"❌ Rendszerhiba: {last_error}")
-    for orig in unique_texts:
-        results[orig] = orig
+                parsed_json = json.loads(raw_text.strip())
+                for idx, orig in enumerate(chunk):
+                    k = str(idx + 1)
+                    if k in parsed_json and parsed_json[k]:
+                        results[orig] = str(parsed_json[k]).strip()
+                success = True
+                break
+            except Exception as e:
+                time.sleep(2)
+
+        if not success:
+            for orig in chunk:
+                results[orig] = orig
+
+        # Folyamatjelző frissítése
+        perc = int(35 + ((c_idx + 1) / total_chunks) * 55)
+        progress_bar.progress(min(perc, 90))
+        status_box.info(f"Feldolgozás alatt: {c_idx + 1}/{total_chunks} csomag lefordítva...")
+        time.sleep(0.8) # Biztonsági ráhagyás a sebességkorlát ellen
 
     return results
 
 def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
-    status_box.info("Excel XML réteg elemzése és DOM faépítés...")
+    status_box.info("Excel XML réteg elemzése és szövegtár kinyerése...")
     progress_bar.progress(15)
 
     in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
@@ -308,12 +299,12 @@ def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
                         raw_texts.append(val.strip())
 
     unique_texts = list(set(raw_texts))
-    status_box.info(f"Kinyerve {len(raw_texts)} mező ({len(unique_texts)} egyedi). AI csomag átadása...")
     progress_bar.progress(35)
 
-    t_map = translate_batch(unique_texts, target_lang, status_box)
-    progress_bar.progress(85)
+    t_map = translate_chunks(unique_texts, target_lang, progress_bar, status_box)
+    progress_bar.progress(92)
 
+    status_box.info("Lefordított szövegek visszaépítése az Excel formátumba...")
     replaced_count = 0
     for item in in_zip.infolist():
         content_bytes = in_zip.read(item.filename)
@@ -366,12 +357,8 @@ def process_docx(file_bytes, target_lang, progress_bar, status_box):
                     if has_letters(p.text):
                         paragraphs_to_translate.append(p)
 
-    status_box.info(f"Word bekezdések kinyerve ({len(paragraphs_to_translate)} db)...")
-    progress_bar.progress(30)
-
     unique_texts = list(set([p.text.strip() for p in paragraphs_to_translate]))
-    t_map = translate_batch(unique_texts, target_lang, status_box)
-    progress_bar.progress(85)
+    t_map = translate_chunks(unique_texts, target_lang, progress_bar, status_box)
 
     count = 0
     for p in paragraphs_to_translate:
@@ -402,12 +389,8 @@ def process_pptx(file_bytes, target_lang, progress_bar, status_box):
                             if has_letters(p.text):
                                 shapes_to_translate.append(p)
 
-    status_box.info(f"PowerPoint diák kinyerve ({len(shapes_to_translate)} db)...")
-    progress_bar.progress(30)
-
     unique_texts = list(set([p.text.strip() for p in shapes_to_translate]))
-    t_map = translate_batch(unique_texts, target_lang, status_box)
-    progress_bar.progress(85)
+    t_map = translate_chunks(unique_texts, target_lang, progress_bar, status_box)
 
     count = 0
     for p in shapes_to_translate:
@@ -421,7 +404,7 @@ def process_pptx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count, len(shapes_to_translate)
 
-# Konténerbe helyezett vezérlőpult
+# Konténerbe helyezett felület
 with st.container():
     col_l, col_center, col_r = st.columns([1, 10, 1])
     with col_center:
@@ -486,7 +469,6 @@ with st.container():
                     progress_bar.empty()
                     status_box.error(f"Kritikus pipeline hiba: {e}")
 
-# Lábléc
 st.markdown("""
 <div class="footer-hud">
     <div>TranslateOS Enterprise Architecture</div>
