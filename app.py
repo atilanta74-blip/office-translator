@@ -8,10 +8,15 @@ import streamlit as st
 from google import genai
 from docx import Document
 from pptx import Presentation
+import pypdf
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfgen import canvas
 
 # Oldalbeállítások
 st.set_page_config(
-    page_title="TranslateOS | Neural Office Translation",
+    page_title="TranslateOS | Neural Office & PDF Translation",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -78,6 +83,7 @@ html, body, [class*="css"] {
     justify-content: center;
     gap: 1rem;
     margin-bottom: 2rem;
+    flex-wrap: wrap;
 }
 
 .format-card {
@@ -154,14 +160,15 @@ div.stDownloadButton > button {
 st.markdown("""
 <div class="hero-container">
     <div class="hero-badge">
-        <span class="dot-green"></span> Core Engine v27.0 BatchFlow Active
+        <span class="dot-green"></span> Core Engine v28.0 UniversalPDF Active
     </div>
     <div class="hero-title">TranslateOS Neural Pro</div>
-    <div class="hero-subtitle">Nagyvállalati szintű intelligens Office fordítórendszer. XML-alapú formázásmegőrzés, nagy adatbázisok kötegelt fordítása.</div>
+    <div class="hero-subtitle">Nagyvállalati szintű intelligens dokumentumfordító rendszer. Teljes körű Office és PDF támogatás.</div>
     <div class="format-grid">
         <div class="format-card">📑 Microsoft Word (.docx)</div>
         <div class="format-card">📊 Microsoft Excel (.xlsx)</div>
         <div class="format-card">📽️ PowerPoint (.pptx)</div>
+        <div class="format-card">📕 Adobe Acrobat (.pdf)</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -199,7 +206,6 @@ def has_letters(text):
     return bool(re.search(r"[a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰ]", t))
 
 def get_active_model_name():
-    """Kiválasztja az első működő szöveges Flash modellt."""
     candidates = ["gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-2.0-flash"]
     try:
         remote_models = [m.name.replace("models/", "") for m in client.models.list()]
@@ -214,7 +220,6 @@ def get_active_model_name():
     return "gemini-flash-lite-latest"
 
 def translate_chunks(unique_texts, target_lang, progress_bar, status_box):
-    """Biztonságos, 60-as blokkokban történő fordítás a token-túllépés és leállás ellen."""
     if not unique_texts:
         return {}
 
@@ -224,7 +229,7 @@ def translate_chunks(unique_texts, target_lang, progress_bar, status_box):
     chunks = [unique_texts[i:i + chunk_size] for i in range(0, len(unique_texts), chunk_size)]
     total_chunks = len(chunks)
 
-    status_box.info(f"⚡ Neural Engine aktív: **{model_name}** | Összesen {len(unique_texts)} egyedi szöveg {total_chunks} csomagban...")
+    status_box.info(f"⚡ Neural Engine aktív: **{model_name}** | {len(unique_texts)} kifejezés {total_chunks} csomagban...")
 
     for c_idx, chunk in enumerate(chunks):
         input_data = {str(idx + 1): txt for idx, txt in enumerate(chunk)}
@@ -260,23 +265,23 @@ def translate_chunks(unique_texts, target_lang, progress_bar, status_box):
                         results[orig] = str(parsed_json[k]).strip()
                 success = True
                 break
-            except Exception as e:
+            except Exception:
                 time.sleep(2)
 
         if not success:
             for orig in chunk:
                 results[orig] = orig
 
-        # Folyamatjelző frissítése
         perc = int(35 + ((c_idx + 1) / total_chunks) * 55)
         progress_bar.progress(min(perc, 90))
-        status_box.info(f"Feldolgozás alatt: {c_idx + 1}/{total_chunks} csomag lefordítva...")
-        time.sleep(0.8) # Biztonsági ráhagyás a sebességkorlát ellen
+        status_box.info(f"Feldolgozás alatt: {c_idx + 1}/{total_chunks} csomag kész...")
+        time.sleep(0.7)
 
     return results
 
+# 1. Excel feldolgozás
 def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
-    status_box.info("Excel XML réteg elemzése és szövegtár kinyerése...")
+    status_box.info("Excel struktúra elemzése...")
     progress_bar.progress(15)
 
     in_zip = zipfile.ZipFile(io.BytesIO(file_bytes), 'r')
@@ -300,11 +305,10 @@ def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
 
     unique_texts = list(set(raw_texts))
     progress_bar.progress(35)
-
     t_map = translate_chunks(unique_texts, target_lang, progress_bar, status_box)
     progress_bar.progress(92)
 
-    status_box.info("Lefordított szövegek visszaépítése az Excel formátumba...")
+    status_box.info("Lefordított tartalom visszaépítése...")
     replaced_count = 0
     for item in in_zip.infolist():
         content_bytes = in_zip.read(item.filename)
@@ -342,6 +346,7 @@ def process_xlsx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_zip_buffer.getvalue(), replaced_count, len(raw_texts)
 
+# 2. Word feldolgozás
 def process_docx(file_bytes, target_lang, progress_bar, status_box):
     doc = Document(io.BytesIO(file_bytes))
     paragraphs_to_translate = []
@@ -372,6 +377,7 @@ def process_docx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count, len(paragraphs_to_translate)
 
+# 3. PowerPoint feldolgozás
 def process_pptx(file_bytes, target_lang, progress_bar, status_box):
     prs = Presentation(io.BytesIO(file_bytes))
     shapes_to_translate = []
@@ -404,14 +410,101 @@ def process_pptx(file_bytes, target_lang, progress_bar, status_box):
     progress_bar.progress(100)
     return out_stream.getvalue(), count, len(shapes_to_translate)
 
-# Konténerbe helyezett felület
+# 4. PDF feldolgozás (Kinyerés -> Fordítás -> Tördelés)
+def process_pdf(file_bytes, target_lang, progress_bar, status_box):
+    status_box.info("PDF szöveges réteg elemzése oldalanként...")
+    progress_bar.progress(15)
+
+    reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+    page_paragraphs = []
+    all_raw_paragraphs = []
+
+    for page_idx, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        
+        # Bekezdések összeállítása
+        cur_para = ""
+        paras = []
+        for line in lines:
+            if not cur_para:
+                cur_para = line
+            elif cur_para.endswith((".", ":", ";", "?", "!")):
+                paras.append(cur_para)
+                cur_para = line
+            else:
+                cur_para += " " + line
+        if cur_para:
+            paras.append(cur_para)
+
+        filtered = [p for p in paras if has_letters(p)]
+        page_paragraphs.append(filtered)
+        all_raw_paragraphs.extend(filtered)
+
+    unique_texts = list(set(all_raw_paragraphs))
+    progress_bar.progress(35)
+    t_map = translate_chunks(unique_texts, target_lang, progress_bar, status_box)
+    progress_bar.progress(90)
+
+    status_box.info("Lefordított PDF dokumentum renderelése...")
+    
+    out_pdf_buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        out_pdf_buffer,
+        pagesize=A4,
+        leftMargin=40,
+        rightMargin=40,
+        topMargin=40,
+        bottomMargin=40
+    )
+
+    styles = getSampleStyleSheet()
+    normal_style = ParagraphStyle(
+        'CustomNormal',
+        parent=styles['Normal'],
+        fontSize=10,
+        leading=14,
+        textColor='#1e293b',
+        spaceAfter=8
+    )
+    header_style = ParagraphStyle(
+        'CustomHeader',
+        parent=styles['Heading2'],
+        fontSize=13,
+        leading=17,
+        textColor='#0f172a',
+        spaceBefore=14,
+        spaceAfter=6
+    )
+
+    story = []
+    replaced_count = 0
+
+    for page_idx, paras in enumerate(page_paragraphs):
+        if page_idx > 0:
+            story.append(Spacer(1, 15))
+        story.append(Paragraph(f"--- <b>{page_idx + 1}. Oldal</b> ---", header_style))
+
+        for p_text in paras:
+            trans = t_map.get(p_text, p_text)
+            if trans != p_text:
+                replaced_count += 1
+            safe_text = trans.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            story.append(Paragraph(safe_text, normal_style))
+
+    doc.build(story)
+    progress_bar.progress(100)
+
+    return out_pdf_buffer.getvalue(), replaced_count, len(all_raw_paragraphs)
+
+# Felhasználói felület
 with st.container():
     col_l, col_center, col_r = st.columns([1, 10, 1])
     with col_center:
         uploaded_file = st.file_uploader(
-            "📁 Dokumentum feltöltése (.docx, .xlsx, .pptx)",
-            type=["docx", "xlsx", "pptx"],
-            help="Húzd be a lefordítani kívánt fájlt az ablakba."
+            "📁 Dokumentum feltöltése (.docx, .xlsx, .pptx, .pdf)",
+            type=["docx", "xlsx", "pptx", "pdf"],
+            help="Word (.docx), Excel (.xlsx), PowerPoint (.pptx) vagy PDF (.pdf) fájlokat tölthetsz fel."
         )
 
         c1, c2 = st.columns([2, 1])
@@ -451,6 +544,9 @@ with st.container():
                     elif ext == ".pptx":
                         translated_bytes, count, total_found = process_pptx(file_bytes, target_lang, progress_bar, status_box)
                         mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    elif ext == ".pdf":
+                        translated_bytes, count, total_found = process_pdf(file_bytes, target_lang, progress_bar, status_box)
+                        mime_type = "application/pdf"
 
                     status_box.success(f"✨ Teljes feldolgozás sikeres! {count} db kifejezés lefordítva ({total_found} összes mezőből).")
 
